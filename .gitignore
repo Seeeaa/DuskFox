@@ -1,0 +1,8 @@
+*
+!.gitignore
+!LICENSE
+!README.md
+!src/
+!src/bridge_webui.cjs
+!src/bridge_webui.html
+!src/gateway.cjs
