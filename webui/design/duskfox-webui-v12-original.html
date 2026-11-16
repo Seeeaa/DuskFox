@@ -508,6 +508,22 @@ body.geo-dragging,body.geo-dragging *{cursor:grabbing!important;user-select:none
 #rail #nav a.is-preview i{font-weight:700}
 @media (max-width:1100px){.geo.geo-nav{position:relative;top:0;margin:0 0 28px auto;width:min(280px,60vw)}}
 
+
+/* v12 · 只调整超宽屏和较窄桌面；其余尺寸沿用 v11。 */
+@media (min-width:1600px){
+ main{--page-max:clamp(1080px,calc(62.5vw + 80px),1680px)}
+ .pg{
+  max-width:var(--page-max);
+  /* 1600px 时与原布局连续，逐渐过渡到主内容区域居中。 */
+  margin-left:max(0px,calc((100% - var(--page-max))/2 - max(0px,calc(480px - 25vw))));
+ }
+}
+@media (min-width:861px) and (max-width:1100px){
+ .pg{--geo-width:clamp(184px,25vw,260px)}
+ .geo.geo-nav{position:absolute;top:-2px;right:0;width:var(--geo-width);margin:0}
+ .pg>h1{max-width:calc(100% - var(--geo-width) - 24px)}
+}
+
 </style>
 <style>.wordwrap{position:fixed;left:0;right:0;display:flex;justify-content:center;perspective:1100px;pointer-events:none;z-index:101}.wordwrap span{display:inline-block;font-family:duskword;line-height:1;color:transparent;-webkit-text-stroke:0.9px var(--ink);transform:rotateY(-100deg);backface-visibility:hidden;-webkit-backface-visibility:hidden;will-change:transform;white-space:nowrap}</style></head>
 <body>
