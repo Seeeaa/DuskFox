@@ -135,6 +135,16 @@ type %USERPROFILE%\.duskfox\config\webui.json   # Windows
 | `sessionMinutes` | `120` | 会话空闲超时，0 表示不过期 |
 | `allowlist` | `[]` | 允许访问控制台的来源地址；空表示不限制 |
 
+## 界面
+
+设计稿（v12，未接线）保存在 `webui/design/duskfox-webui-v12-original.html`，
+接线后的控制台是 `webui/index.html`（同一套视觉与页面，数据全部来自真实接口）。
+
+![概览](docs/screenshots/02-overview.png)
+![网络](docs/screenshots/05-network.png)
+![账号与二维码](docs/screenshots/04-account-qr.png)
+![调试](docs/screenshots/07-debug.png)
+
 ## 5. 控制台
 
 `http://<host>:<port>/#/overview`，令牌登录，会话令牌只存在 `sessionStorage`。
