@@ -97,3 +97,47 @@ test('原生桥接驱动：状态、二维码、收发与事件轮询', async ()
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test('原生桥接驱动兼容异步二维码契约', async () => {
+  let qrReady = false;
+  let loginMode: 'active' | 'passive' = 'active';
+  const image = `data:image/png;base64,${Buffer.from('fixture').toString('base64')}`;
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://localhost');
+    response.setHeader('content-type', 'application/json');
+    if (url.pathname === '/api/status') {
+      response.end(JSON.stringify({ message_ready: false, self_id: null, qr_ready: qrReady, login_mode: loginMode }));
+    } else if (url.pathname === '/api/qr/refresh') {
+      response.statusCode = 202;
+      response.end(JSON.stringify({ accepted: true }));
+      setTimeout(() => { qrReady = true; }, 100);
+    } else if (url.pathname === '/api/qr') {
+      response.statusCode = qrReady ? 200 : 404;
+      response.end(JSON.stringify(qrReady ? { image } : { error: 'QR not available' }));
+    } else {
+      response.statusCode = 404;
+      response.end('{}');
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  const instance = await startInstance({ driver: 'bridge', driverOptions: { endpoint: `http://127.0.0.1:${port}` } });
+  try {
+    const requested = await instance.call('POST', '/api/qr/refresh');
+    assert.equal(requested.status, 200);
+    assert.equal(requested.json.image, undefined);
+    await waitFor(async () => (await instance.call('GET', '/api/qr')).json.image === image, 5000);
+    const qr = await instance.call('GET', '/api/qr');
+    assert.equal(qr.json.state, 'waiting');
+    assert.equal(qr.json.image, image);
+    loginMode = 'passive';
+    await waitFor(async () => {
+      const status = await instance.call('GET', '/api/status');
+      return status.json.capabilities.some((row: { key: string; state: string }) => row.key === 'qr' && row.state === 'no');
+    }, 5000);
+  } finally {
+    await instance.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
