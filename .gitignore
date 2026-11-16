@@ -2,6 +2,8 @@
 !.gitignore
 !LICENSE
 !README.md
+!package.json
+!package-lock.json
 !src/
 !src/bridge_webui.cjs
 !src/bridge_webui.html

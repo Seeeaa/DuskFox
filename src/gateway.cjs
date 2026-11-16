@@ -1,13 +1,14 @@
 'use strict';
 
 // OneBot v11 text-only adapter for duskfox.
-// Run with Node 24 in the same container as bridge_webui.cjs.
+// Run in a separate Node 24 process with access to the bridge token file.
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const http = require('node:http');
+const WebSocket = require('ws');
 
-const dir = path.join(process.env.HOME || '/home/node', '.qq-native-bridge');
+const dir = process.env.QQ_BRIDGE_DATA_DIR || path.join(process.env.HOME || '/home/node', '.qq-native-bridge');
 const nativeToken = fs.readFileSync(path.join(dir, 'admin.token'), 'utf8').trim();
 const onebotTokenPath = path.join(dir, 'onebot.token');
 if (!fs.existsSync(onebotTokenPath)) {
@@ -15,13 +16,18 @@ if (!fs.existsSync(onebotTokenPath)) {
     { flag: 'wx', mode: 0o600 });
 }
 const onebotToken = fs.readFileSync(onebotTokenPath, 'utf8').trim();
-const nativeBase = 'http://127.0.0.1:16082';
+const nativeBase = process.env.QQ_NATIVE_BASE || 'http://127.0.0.1:16082';
 const nativeHeaders = { Authorization: `Bearer ${nativeToken}` };
 let cursor = 0;
+let cursorInitialized = false;
 let online = false;
+let eventsReady = false;
 let selfId = 0;
 let reverse = null;
+let polling = false;
+let lastConnectAttempt = 0;
 const reverseUrl = process.env.QQ_BRIDGE_REVERSE_WS || '';
+const reverseToken = process.env.QQ_BRIDGE_REVERSE_TOKEN || '';
 
 async function native(pathname, method = 'GET', body) {
   const response = await fetch(nativeBase + pathname, {
@@ -47,7 +53,7 @@ function plainText(input) {
 
 async function action(name, params = {}, echo) {
   try {
-    if (name === 'get_status') return result({ online, good: online }, echo);
+    if (name === 'get_status') return result({ online, good: online && eventsReady }, echo);
     if (name === 'get_login_info') {
       if (!selfId) throw new Error('QQ is offline');
       return result({ user_id: selfId, nickname: String(selfId) }, echo);
@@ -94,40 +100,80 @@ http.createServer((request, response) => {
       'cache-control': 'no-store' });
     response.end(JSON.stringify(answer));
   });
-}).listen(Number(process.env.QQ_ONEBOT_PORT || 13001), '127.0.0.1');
+}).listen(Number(process.env.QQ_ONEBOT_PORT || 13001), process.env.QQ_ONEBOT_HOST || '127.0.0.1');
 
 async function poll() {
+  if (polling) return;
+  polling = true;
   try {
     const status = await native('/api/status');
     online = Boolean(status.message_ready);
     selfId = Number(status.self_id || 0);
-  } catch (_) { online = false; return; }
-  try {
-    const batch = await native(`/api/events?after=${cursor}`);
-    for (const item of batch.events || []) {
-      cursor = Math.max(cursor, item.cursor);
-      if (reverse?.readyState === WebSocket.OPEN) reverse.send(JSON.stringify(item.data));
-    }
-  } catch (_) { /* The native event route becomes available on next QQ startup. */ }
+    if (!online || !Number.isSafeInteger(selfId) || selfId <= 0) return;
+    try {
+      const batch = await native(`/api/events?after=${cursor}`);
+      eventsReady = true;
+      if (!cursorInitialized) {
+        // Start from the live edge so an adapter restart does not replay old chats.
+        cursor = Number(batch.cursor || 0);
+        cursorInitialized = true;
+      } else if (Number(batch.cursor) < cursor) {
+        // The QQ bridge restarted and its in-memory sequence began again.
+        cursor = 0;
+      } else if (reverse?.readyState === WebSocket.OPEN) {
+        for (const item of batch.events || []) {
+          if (!Number.isSafeInteger(item.cursor) || item.cursor <= cursor) continue;
+          await new Promise((resolve, reject) => reverse.send(JSON.stringify(item.data),
+            error => error ? reject(error) : resolve()));
+          cursor = item.cursor;
+        }
+      }
+    } catch (_) { eventsReady = false; /* An older QQ session may lack this route. */ }
+    connectReverse();
+  } catch (_) {
+    online = false;
+    eventsReady = false;
+  } finally {
+    polling = false;
+  }
+}
+
+function sendMeta(type) {
+  if (reverse?.readyState !== WebSocket.OPEN) return;
+  const data = { time: Math.floor(Date.now() / 1000), self_id: selfId,
+    post_type: 'meta_event', meta_event_type: type };
+  if (type === 'lifecycle') data.sub_type = 'connect';
+  else { data.status = { online, good: online && eventsReady }; data.interval = 30000; }
+  reverse.send(JSON.stringify(data));
 }
 
 function connectReverse() {
-  if (!reverseUrl || reverse) return;
+  if (!reverseUrl || reverse || !online || !eventsReady || !selfId || Date.now() - lastConnectAttempt < 3000) return;
+  lastConnectAttempt = Date.now();
   try {
-    const ws = new WebSocket(reverseUrl);
+    const headers = { 'X-Self-ID': String(selfId), 'X-Client-Role': 'Universal',
+      'User-Agent': 'duskfox/0.1.0' };
+    if (reverseToken) headers.Authorization = `Bearer ${reverseToken}`;
+    const ws = new WebSocket(reverseUrl, { headers, handshakeTimeout: 5000,
+      maxPayload: 65536, perMessageDeflate: false });
     reverse = ws;
-    ws.onmessage = async event => {
+    ws.on('open', () => { sendMeta('lifecycle'); void poll(); });
+    ws.on('message', async raw => {
       try {
-        const command = JSON.parse(event.data);
-        const answer = await action(String(command.action || ''), command.params || {}, command.echo);
+        const command = JSON.parse(raw.toString());
+        if (!command || typeof command.action !== 'string') return;
+        const answer = await action(command.action, command.params || {}, command.echo);
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(answer));
-      } catch (_) {}
-    };
-    ws.onclose = () => { reverse = null; };
-    ws.onerror = () => {};
-  } catch (_) { reverse = null; }
+      } catch (_) { /* Ignore malformed or interrupted requests. */ }
+    });
+    ws.on('close', () => { if (reverse === ws) reverse = null; });
+    ws.on('error', () => {});
+  } catch (_) {
+    reverse = null;
+  }
 }
 
-setInterval(() => { void poll(); connectReverse(); }, 1000);
+setInterval(() => { void poll(); }, 1000);
+setInterval(() => { sendMeta('heartbeat'); }, 30000);
 void poll();
 console.log('onebot_gateway_listening');
