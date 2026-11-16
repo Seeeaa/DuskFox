@@ -20,6 +20,8 @@ const EVENT_INTERVAL_MS = 1000;
 
 interface BridgeStatusPayload {
   readonly message_ready?: boolean;
+  readonly qr_ready?: boolean;
+  readonly login_mode?: 'active' | 'passive';
   readonly self_id?: number | string;
   readonly nickname?: string;
   readonly avatar?: string;
@@ -48,11 +50,9 @@ export class BridgeDriver implements AccountDriver {
   readonly id = 'bridge';
   readonly name = 'QQ 原生桥接';
   readonly description = '连接一个独立的 QQ 原生运行时（HTTP 契约），当前仅支持私聊文本。';
-  readonly capabilities: Capabilities = capabilityMap({
-    privateMessage: true,
-    qrLogin: true,
-    logout: true,
-  });
+  get capabilities(): Capabilities {
+    return capabilityMap({ privateMessage: true, qrLogin: this.#loginMode !== 'passive' });
+  }
 
   readonly #context: DriverContext;
   readonly #endpoint: string;
@@ -74,6 +74,7 @@ export class BridgeDriver implements AccountDriver {
   #eventTimer: ReturnType<typeof setInterval> | null = null;
   #polling = false;
   #lastError = '';
+  #loginMode: 'active' | 'passive' | 'unknown' = 'unknown';
 
   constructor(context: DriverContext, options: DriverOptions) {
     this.#context = context;
@@ -119,16 +120,22 @@ export class BridgeDriver implements AccountDriver {
   }
 
   async qrCode(): Promise<QrPayload> {
+    if (!this.#status.online) await this.#fetchQr();
     return this.#qr;
   }
 
   async refreshQr(): Promise<QrPayload> {
-    const payload = await this.#request<{ picture?: string; expires_at?: number; seq?: number; available?: boolean }>(
+    const payload = await this.#request<{ picture?: string; image?: string; expires_at?: number; seq?: number; available?: boolean; accepted?: boolean }>(
       '/api/qr/refresh',
       'POST',
     );
-    this.#qr = this.#qrFromPayload(payload);
+    // The original native bridge returns 202 {accepted:true}; its QR image
+    // arrives later through GET /api/qr. Other runtimes may return it here.
+    this.#qr = payload.picture || payload.image
+      ? this.#qrFromPayload(payload)
+      : { state: 'none', seq: (this.#qr.seq ?? 0) + 1 };
     this.#context.emit({ type: 'qr', qr: this.#qr });
+    if (!this.#qr.image) await this.#fetchQr();
     return this.#qr;
   }
 
@@ -181,6 +188,7 @@ export class BridgeDriver implements AccountDriver {
     this.#polling = true;
     try {
       const payload = await this.#request<BridgeStatusPayload>('/api/status');
+      this.#loginMode = payload?.login_mode ?? 'unknown';
       const online = Boolean(payload?.message_ready && payload?.self_id);
       const uin = payload?.self_id ? String(payload.self_id) : '';
       const next: AccountStatus = {
@@ -194,6 +202,7 @@ export class BridgeDriver implements AccountDriver {
       };
       this.#lastError = '';
       this.#setStatus(next);
+      if (!online && payload?.qr_ready && !this.#qr.image) await this.#fetchQr();
       if (online && this.#qr.state !== 'none') {
         this.#qr = { state: 'none', seq: this.#qr.seq };
         this.#context.emit({ type: 'qr', qr: this.#qr });
@@ -207,6 +216,20 @@ export class BridgeDriver implements AccountDriver {
       this.#setStatus({ uin: '', nick: '', avatar: '', state: 'error', online: false, loginType: 'none', detail });
     } finally {
       this.#polling = false;
+    }
+  }
+
+  async #fetchQr(): Promise<void> {
+    try {
+      const response = await this.#request<{ picture?: string; image?: string; expires_at?: number; seq?: number; available?: boolean }>('/api/qr');
+      const next = this.#qrFromPayload(response);
+      if (next.image && next.image !== this.#qr.image) {
+        this.#qr = next;
+        this.#context.emit({ type: 'qr', qr: next });
+      }
+    } catch (error) {
+      // A 404 means the asynchronous QR request is still in progress.
+      if (!(error instanceof Error && error.message.includes('HTTP 404'))) throw error;
     }
   }
 
@@ -265,12 +288,13 @@ export class BridgeDriver implements AccountDriver {
     return segments;
   }
 
-  #qrFromPayload(payload: { picture?: string; expires_at?: number; seq?: number; available?: boolean } | null): QrPayload {
-    if (!payload || payload.available === false || !payload.picture) {
+  #qrFromPayload(payload: { picture?: string; image?: string; expires_at?: number; seq?: number; available?: boolean } | null): QrPayload {
+    const picture = payload?.picture ?? payload?.image;
+    if (!payload || payload.available === false || !picture) {
       // The bridge reports "no code" while the account is already signed in.
       return { state: this.#status.online ? 'none' : 'expired', seq: (this.#qr.seq ?? 0) + 1 };
     }
-    const image = payload.picture.startsWith('data:') ? payload.picture : `data:image/png;base64,${payload.picture}`;
+    const image = picture.startsWith('data:') ? picture : `data:image/png;base64,${picture}`;
     return {
       state: 'waiting',
       image,
