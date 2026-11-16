@@ -35,6 +35,7 @@ let capturedSession = null;
 let lastPrivatePeer = null;
 const privatePeers = new Map();
 const recentEvents = [];
+const seenMessageIds = new Set();
 let eventCursor = 0;
 
 // Observe the session QQ itself creates. This preserves the original return
@@ -296,18 +297,28 @@ function attachMessages() {
           state.messageShape = Object.keys(messages[0]).sort();
         }
         for (const msg of messages) {
-          if (msg?.chatType !== 1 || !msg.senderUid || !msg.peerUid) continue;
+          if (msg?.chatType !== 1 || !msg.senderUid || !msg.peerUid || msg.isImportMsg === true) continue;
           if (state.selfId && String(msg.senderUin) === state.selfId) continue;
           lastPrivatePeer = { chatType: 1, peerUid: String(msg.peerUid) };
           state.lastPrivateMessageReady = true;
           const uin = String(msg.senderUin || '');
           if (!/^\d{5,12}$/.test(uin)) continue;
           privatePeers.set(uin, String(msg.peerUid));
-          const timestamp = Number(msg.msgTime || 0);
+          if (privatePeers.size > 1024) privatePeers.delete(privatePeers.keys().next().value);
+          const rawTime = Number(msg.msgTime || msg.timeStamp || 0);
+          const timestamp = rawTime > 1e12 ? Math.floor(rawTime / 1000) : rawTime;
           if (!timestamp || Math.abs(Date.now() / 1000 - timestamp) > 120) continue;
           const content = (Array.isArray(msg.elements) ? msg.elements : [])
             .map(element => element?.textElement?.content || '').join('');
           if (!content) continue;
+          const nativeId = String(msg.msgId && String(msg.msgId) !== '0'
+            ? msg.msgId : (msg.msgSeq || ''));
+          if (nativeId) {
+            const key = `${uin}:${nativeId}`;
+            if (seenMessageIds.has(key)) continue;
+            seenMessageIds.add(key);
+            if (seenMessageIds.size > 1024) seenMessageIds.delete(seenMessageIds.values().next().value);
+          }
           const cursor = ++eventCursor;
           recentEvents.push({ cursor, data: { time: Math.floor(Date.now() / 1000),
             self_id: Number(state.selfId), post_type: 'message', message_type: 'private',
