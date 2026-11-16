@@ -629,7 +629,7 @@ var API={status:{m:'GET',p:'/api/status'},config:{m:'GET',p:'/api/config'},logs:
 var T0=Date.now();
 var S={demo:'normal',stat:{rx:0,tx:0,conn:0,epm:0},
  acct:{uin:'',nick:'',online:false,via:'未登录',avatar:''},
- proc:{pid:'—',cpu:null,mem:null,ver:'—',args:'—',running:false},procAvail:false,
+ proc:{pid:'—',cpu:null,mem:null,ver:'—',args:'—',running:false},procAvail:false,procNote:'',
  net:{'http-server':[],'ws-client':[],'http-client':[],'sse':[],'ws-server':[]},
  ob:{fmt:'array',reportSelf:false,heartbeat:30000,idMode:'hash',debug:false,ignoreGroup:false},
  evt:{privateMessage:true,groupMessage:true,metaEvent:true,notice:true,request:true},
@@ -800,12 +800,19 @@ function updateQrCountdown(){
 function procBody(){
  var p=S.proc;
  return '<dl class="kv"><dt>状态</dt><dd>'+(p.running?'<span class="tg a">运行中</span>':'<span class="tg n">未运行</span>')+'</dd><dt>PID</dt><dd class="mono">'+(p.pid||'—')+'</dd><dt>CPU / 内存</dt><dd>'+(p.cpu==null?'—':p.cpu)+'% / '+(p.mem==null?'—':p.mem)+' MB</dd><dt>版本</dt><dd>'+E(p.ver||'—')+'</dd><dt>启动参数</dt><dd class="mono">'+E(p.args||'—')+'</dd></dl>'+
-  (S.procAvail?'<div class="row" style="margin-top:20px"><button class="btn g s" data-act="ps" data-v="start">启动</button><button class="btn g s" data-act="ps" data-v="restart">重启</button><button class="btn g s" data-act="ps" data-v="stop">停止</button></div>':'');
+  (S.procAvail?'<div class="row" style="margin-top:20px"><button class="btn g s" data-act="ps" data-v="start">启动</button><button class="btn g s" data-act="ps" data-v="restart">重启</button><button class="btn g s" data-act="ps" data-v="stop">停止</button></div>':'')+
+  (S.procNote?'<div class="note" style="margin-top:16px">'+E(S.procNote)+'</div>':'');
 }
 function loadProcess(){
  if(!S.procAvail){S.proc={pid:'—',cpu:null,mem:null,ver:'—',args:'—',running:false};return}
  api('GET','/api/process').then(function(d){
-  S.proc={pid:d.pid||'—',cpu:d.cpu==null?null:d.cpu,mem:d.memoryMb==null?null:d.memoryMb,ver:d.version||'—',args:d.args||'—',running:!!d.running};
+  if(d&&d.available===false){
+   S.proc={pid:'—',cpu:null,mem:null,ver:'—',args:'—',running:false};
+   S.procNote=d.note||'当前驱动不提供进程信息';
+  }else{
+   S.proc={pid:d.pid||'—',cpu:d.cpu==null?null:d.cpu,mem:d.memoryMb==null?null:d.memoryMb,ver:d.version||'—',args:d.args||'—',running:!!d.running};
+   S.procNote='';
+  }
   var el=$('#procbody');if(el&&cur==='account')el.innerHTML=procBody();
  }).catch(function(){});
 }

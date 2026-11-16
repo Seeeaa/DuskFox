@@ -283,12 +283,18 @@ export class BridgeDriver implements AccountDriver {
     const headers: Record<string, string> = { accept: 'application/json' };
     if (this.#token) headers.authorization = `Bearer ${this.#token}`;
     if (body !== undefined) headers['content-type'] = 'application/json';
-    const response = await fetch(`${this.#endpoint}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(5000),
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${this.#endpoint}${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`桥接服务不可达：${this.#endpoint}（${reason}）`);
+    }
     if (!response.ok) throw new Error(`桥接服务返回 HTTP ${response.status}`);
     return (await response.json()) as T;
   }
