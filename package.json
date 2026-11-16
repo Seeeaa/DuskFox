@@ -1,0 +1,38 @@
+{
+  "name": "duskfox",
+  "version": "0.5.0",
+  "description": "Cross-platform QQ → OneBot v11 connector with a web console (napcat-inspired architecture).",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bin": {
+    "duskfox": "dist/main.js"
+  },
+  "main": "dist/main.js",
+  "files": [
+    "dist",
+    "webui",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "dev": "node --watch src/main.ts",
+    "test": "node --test --test-reporter=spec \"tests/*.test.ts\"",
+    "ui": "node tools/ui-smoke.mjs"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.41",
+    "json5": "^2.2.3",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3"
+  }
+}

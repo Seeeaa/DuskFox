@@ -1,0 +1,143 @@
+import type {
+  AccountRequest,
+  AccountStatus,
+  AccountNotice,
+  DriverEvent,
+  Friend,
+  Group,
+  GroupMember,
+  InboundMessage,
+  LoginRequest,
+  OutboundMessage,
+  ProcessInfo,
+  QrPayload,
+  StrangerInfo,
+} from '../core/model.ts';
+import type { Logger } from '../core/logger.ts';
+import type { RuntimePaths } from '../core/paths.ts';
+import type { OnebotConfig } from '../core/config.ts';
+
+/**
+ * Feature switches a driver advertises. OneBot actions declare which keys they
+ * need, so an unsupported feature is refused centrally instead of failing deep
+ * inside a driver with an opaque error.
+ */
+export interface Capabilities {
+  readonly privateMessage: boolean;
+  readonly groupMessage: boolean;
+  readonly mediaImage: boolean;
+  readonly mediaRecord: boolean;
+  readonly mediaVideo: boolean;
+  readonly mediaFile: boolean;
+  readonly reply: boolean;
+  readonly at: boolean;
+  readonly face: boolean;
+  readonly forward: boolean;
+  readonly json: boolean;
+  readonly markdown: boolean;
+  readonly recall: boolean;
+  readonly friendList: boolean;
+  readonly groupList: boolean;
+  readonly strangerInfo: boolean;
+  readonly groupMemberInfo: boolean;
+  readonly processControl: boolean;
+  readonly qrLogin: boolean;
+  readonly quickLogin: boolean;
+  readonly passwordLogin: boolean;
+  readonly logout: boolean;
+}
+
+export type CapabilityKey = keyof Capabilities;
+
+export function capabilityMap(values: Partial<Capabilities>): Capabilities {
+  const base: Capabilities = {
+    privateMessage: false,
+    groupMessage: false,
+    mediaImage: false,
+    mediaRecord: false,
+    mediaVideo: false,
+    mediaFile: false,
+    reply: false,
+    at: false,
+    face: false,
+    forward: false,
+    json: false,
+    markdown: false,
+    recall: false,
+    friendList: false,
+    groupList: false,
+    strangerInfo: false,
+    groupMemberInfo: false,
+    processControl: false,
+    qrLogin: false,
+    quickLogin: false,
+    passwordLogin: false,
+    logout: false,
+  };
+  return { ...base, ...values };
+}
+
+export interface DriverContext {
+  readonly logger: Logger;
+  readonly paths: RuntimePaths;
+  /** Push an event towards OneBot and the console. */
+  readonly emit: (event: DriverEvent) => void;
+  /** Current OneBot options (report self messages, debug payloads, ...). */
+  readonly onebot: () => OnebotConfig;
+}
+
+export interface SendResult {
+  readonly messageId: string;
+}
+
+/** Contract every account backend implements. */
+export interface AccountDriver {
+  readonly id: string;
+  readonly name: string;
+  /** One sentence shown in the console. */
+  readonly description: string;
+  readonly capabilities: Capabilities;
+
+  /** Wire up timers and event polling; must not throw when the backend is absent. */
+  start(): Promise<void>;
+  /** Release every resource; must be safe to call twice. */
+  stop(): Promise<void>;
+
+  status(): Promise<AccountStatus>;
+  events(): readonly InboundMessage[];
+  login(request: LoginRequest): Promise<void>;
+  logout(): Promise<void>;
+  qrCode(): Promise<QrPayload>;
+  refreshQr(): Promise<QrPayload>;
+
+  sendMessage(message: OutboundMessage): Promise<SendResult>;
+  recall(messageId: string): Promise<void>;
+  friendList(): Promise<Friend[]>;
+  groupList(): Promise<Group[]>;
+  strangerInfo(userId: string): Promise<StrangerInfo>;
+  groupMemberInfo(groupId: string, userId: string): Promise<GroupMember>;
+  // Optional diagnostics.
+  processInfo?(): Promise<ProcessInfo>;
+  controlProcess?(action: 'start' | 'restart' | 'stop'): Promise<void>;
+  // Optional notices/requests feed used by tests and advanced drivers.
+  emitNotice?(notice: AccountNotice): void;
+  emitRequest?(request: AccountRequest): void;
+}
+
+export interface DriverDescriptor {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly create: (context: DriverContext, options: DriverOptions) => AccountDriver;
+}
+
+export interface DriverOptions {
+  /** Base URL of an external account runtime, when the driver needs one. */
+  readonly endpoint?: string;
+  /** Bearer token for the external runtime. */
+  readonly token?: string;
+  /** Enable synthetic traffic (mock driver only). */
+  readonly simulate?: boolean;
+  /** Sign in automatically after start (mock driver only). */
+  readonly autoLogin?: boolean;
+}
