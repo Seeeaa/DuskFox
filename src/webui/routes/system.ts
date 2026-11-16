@@ -65,12 +65,21 @@ export function registerSystemRoutes(router: Router, context: WebuiContext, guar
   });
 
   router.get('/api/process', async ({ res }) => {
-    const info = context.driver.processInfo ? await context.driver.processInfo() : null;
-    if (!info) {
+    if (!context.driver.processInfo) {
       sendJson(res, 200, { available: false, running: false, note: '当前驱动不提供进程信息' });
       return;
     }
-    sendJson(res, 200, { available: true, ...info });
+    try {
+      const info = await context.driver.processInfo();
+      sendJson(res, 200, { available: true, ...info });
+    } catch (error) {
+      // A runtime that is down is a normal state, not a server error.
+      sendJson(res, 200, {
+        available: false,
+        running: false,
+        note: error instanceof Error ? error.message : String(error),
+      });
+    }
   });
 
   router.post('/api/process/:action', async ({ res, params }) => {
