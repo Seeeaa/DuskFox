@@ -21,6 +21,10 @@ const EVENT_INTERVAL_MS = 1000;
 
 interface BridgeStatusPayload {
   readonly message_ready?: boolean;
+  /** Login/authorisation finished; the message network may still be down. */
+  readonly authorized?: boolean;
+  /** getMsfStatus(): 1=disconnected, 2=connected. */
+  readonly msf_status?: number;
   readonly qr_ready?: boolean;
   readonly phase?: string;
   readonly login_mode?: 'active' | 'passive';
@@ -367,15 +371,23 @@ export class BridgeDriver implements AccountDriver {
         );
       }
       const online = Boolean(payload?.message_ready && payload?.self_id);
+      const authorized = Boolean(payload?.authorized);
+      const msf = Number(payload?.msf_status ?? 0);
       const uin = payload?.self_id ? String(payload.self_id) : '';
       const next: AccountStatus = {
-        uin: online ? uin : '',
-        nick: online ? String(payload?.nickname ?? uin) : '',
-        avatar: online ? String(payload?.avatar ?? '') : '',
-        state: online ? 'online' : 'offline',
+        uin: authorized || online ? uin : '',
+        nick: authorized || online ? String(payload?.nickname ?? '') : '',
+        avatar: authorized || online ? String(payload?.avatar ?? '') : '',
+        // Authorised with the message network down is "logging": signed in but
+        // not able to send yet. It must not look like a fresh, logged-out app.
+        state: online ? 'online' : authorized ? 'logging' : 'offline',
         online,
-        loginType: online ? 'session' : 'none',
-        detail: online ? undefined : '桥接服务在线，但 QQ 会话尚未就绪',
+        loginType: online ? 'session' : authorized ? 'qr' : 'none',
+        detail: online
+          ? undefined
+          : authorized
+            ? `已授权，消息网络未连接（MSF=${msf}）`
+            : '桥接服务在线，但 QQ 会话尚未就绪',
       };
       this.#lastError = '';
       this.#setStatus(next);
@@ -404,11 +416,25 @@ export class BridgeDriver implements AccountDriver {
         available?: boolean;
         phase?: string;
         login_mode?: 'active' | 'passive';
+        state?: string;
+        hint?: string;
+        refreshable?: boolean;
       }>('/api/qr');
       if (response?.phase) this.#phase = response.phase;
       if (response?.login_mode) this.#applyLoginMode(response.login_mode);
-      const next = this.#qrFromPayload(response);
-      if (next.image !== this.#qr.image) this.#qr = next;
+      if (response?.state === 'none' && response?.hint) {
+        // Authorised: the runtime intentionally returns no picture, only a hint.
+        this.#qr = {
+          state: 'none',
+          seq: Number(response.seq ?? this.#qr.seq),
+          refreshable: response.refreshable === true,
+          loginMode: this.#loginMode,
+          hint: String(response.hint),
+        };
+      } else {
+        const next = this.#qrFromPayload(response);
+        if (next.image !== this.#qr.image) this.#qr = next;
+      }
       this.#publishQr();
     } catch (error) {
       // A 404 means the runtime has no code right now (async request pending),
@@ -661,6 +687,8 @@ export class BridgeDriver implements AccountDriver {
     if (this.#status.online) {
       return { state: 'none', seq, refreshable: this.#qrRefreshable, loginMode: this.#loginMode };
     }
+    // Authorised: keep the runtime's explanation instead of falling back to QR.
+    if (this.#qr.state === 'none' && this.#qr.hint) return this.#qr;
     // The runtime phase is authoritative: a cached picture must not hide
     // "already scanned" / "authenticated" / "failed" transitions.
     if (this.#phase === 'confirm_on_phone') {

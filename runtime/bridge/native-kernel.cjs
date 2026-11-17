@@ -22,6 +22,10 @@ class NativeKernel {
     this.nick = '';
     this.avatar = '';
     this.online = false;
+    /** 扫码授权完成与消息网络可用是两件事，分开记录。 */
+    this.loginSucceeded = false;
+    /** getMsfStatus(): 1=断开, 2=已连接。 */
+    this.msfStatus = 0;
     this.qrState = 'none';
     this.qrSeq = 0;
     this.qr = null;
@@ -95,8 +99,30 @@ class NativeKernel {
     clearInterval(this.msgTimer);
   }
 
+  refreshMsf() {
+    try {
+      if (!this.loginService) return;
+      const value = this.loginService.getMsfStatus();
+      if (typeof value === 'number') {
+        this.msfStatus = value;
+        this.probe.msfStatus = value;
+      }
+    } catch (error) {
+      // 待实机：该方法在部分版本不存在，保留上一次值。
+    }
+    this.online = Boolean(this.loginSucceeded && this.msfStatus === 2 && this.msgService);
+  }
+
   status() {
-    return { uin: this.online ? this.uin : '', nick: this.nick, avatar: this.avatar, online: this.online };
+    this.refreshMsf();
+    return {
+      uin: this.loginSucceeded ? this.uin : '',
+      nick: this.loginSucceeded ? this.nick : '',
+      avatar: this.loginSucceeded ? this.avatar : '',
+      online: this.online,
+      authorized: this.loginSucceeded,
+      msf: this.msfStatus,
+    };
   }
 
   diagnostics() {
@@ -141,7 +167,9 @@ class NativeKernel {
             if (/^\d+$/.test(uin)) self.uin = uin;
             self.qrState = 'confirmed';
             self.qr = null;
-            self.online = true;
+            // 授权完成 ≠ 消息网络可用；online 由 MSF=2 决定。
+            self.loginSucceeded = true;
+            self.refreshMsf();
           },
           onQRCodeSessionFailed() {
             if (self.online) return;
@@ -222,14 +250,8 @@ class NativeKernel {
       this.msgService = candidate;
       this.messageListener = listener;
       this.attachRequestListeners(session);
-      this.online = true;
-      try {
-        const msf = this.loginService && this.loginService.getMsfStatus();
-        this.probe.msfStatus = typeof msf === 'number' ? msf : null;
-        if (typeof msf === 'number' && msf !== 2) this.online = false;
-      } catch (error) {
-        // 【待实机验证】getMsfStatus 语义；拿不到时按在线处理已有会话。
-      }
+      // 会话捕获不等于可收发；online 由 MSF=2 决定。
+      this.refreshMsf();
     } catch (error) {
       this.probe.lastAttachError = String(error?.name || 'Error');
       // 会话尚未建立：下一轮重试。
