@@ -72,9 +72,11 @@ test('原生桥接驱动：状态、二维码、收发与事件轮询', async ()
     assert.equal(status.json.account.loginType, 'session');
     assert.equal(status.json.capabilities.find((row: { key: string }) => row.key === 'group').state, 'no');
 
+    // An already-online account must never be presented with a QR again,
+    // even if the runtime still holds a previously issued picture.
     const qr = await instance.call('POST', '/api/qr/refresh');
-    assert.equal(qr.json.state, 'waiting');
-    assert.match(qr.json.image, /^data:image\/png;base64,/);
+    assert.equal(qr.json.state, 'none');
+    assert.equal(qr.json.image, undefined);
 
     const send = await instance.call('POST', '/api/action/send_private_msg', { user_id: 30001, message: '桥接发送' });
     assert.equal(send.json.status, 'ok');

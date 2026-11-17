@@ -215,6 +215,19 @@ class NativeKernel {
             if (!item || !item.friendUid) continue;
             const flag = 'friend|' + item.friendUid + '|' + (item.reqTime || '');
             this.friendRequests.set(flag, { friendUid: String(item.friendUid), reqTime: String(item.reqTime || '') });
+            // 【待实机验证】请求事件的字段；flag 与 handleRequest 使用同一编码。
+            this.emit({
+              type: 'request',
+              request: {
+                kind: 'friend',
+                time: Math.floor(Date.now() / 1000),
+                scene: 'private',
+                peer: { id: String(item.friendUid) },
+                user: { id: String(item.friendUid) },
+                comment: String(item.msg || item.comment || ''),
+                flag,
+              },
+            });
           }
         },
       });
@@ -227,6 +240,19 @@ class NativeKernel {
             if (!item || !item.seq) continue;
             const flag = 'group|' + item.seq + '|' + item.type + '|' + (item.group && item.group.groupCode);
             this.groupNotices.set(flag, item);
+            this.emit({
+              type: 'request',
+              request: {
+                kind: 'group',
+                time: Math.floor(Date.now() / 1000),
+                scene: 'group',
+                peer: { id: String((item.group && item.group.groupCode) || '') },
+                user: { id: String(item.uin || item.userUin || '') },
+                comment: String(item.postscript || ''),
+                flag,
+                detail: { sub_type: 'add' },
+              },
+            });
           }
         },
       });
@@ -301,7 +327,9 @@ class NativeKernel {
     const result = await this.msgService.sendMsg('0', peer, elements, new Map());
     if (!result || result.result !== 0) throw new Error('sendMsg 返回 ' + JSON.stringify(result));
     // 【待实机验证】sendMsg 的返回是否直接含 msgId；旧桥接用自增游标占位。
-    return { messageId: String(result.msgId || result.msgSeq || Date.now()) };
+    const messageId = String(result.msgId || result.msgSeq || Date.now());
+    this.peerByMsgId.set(messageId, peer);
+    return { messageId };
   }
 
   /**
@@ -397,8 +425,10 @@ class NativeKernel {
 
   async recall(messageId) {
     if (!this.msgService) throw new Error('消息服务未就绪');
-    // 【待实机验证】Peer 需要原始会话；这里按私聊会话尝试，群消息撤回需补 peer 缓存。
-    const peer = { chatType: CHAT_PRIVATE, peerUid: '', guildId: '' };
+    // 撤回必须带原始 Peer；收消息和发消息时都会写入 peerByMsgId。
+    const peer = this.peerByMsgId.get(String(messageId));
+    if (!peer) throw new Error('该消息不属于当前会话缓存，无法撤回');
+    // 【待实机验证】recallMsg 的返回与确认事件。
     const result = await this.msgService.recallMsg(peer, [String(messageId)]);
     if (result && result.result !== undefined && result.result !== 0) throw new Error('recallMsg 返回 ' + result.result);
     return true;
