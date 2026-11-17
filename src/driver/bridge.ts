@@ -770,12 +770,15 @@ export class BridgeDriver implements AccountDriver {
     if (this.#token) headers.authorization = `Bearer ${this.#token}`;
     if (body !== undefined) headers['content-type'] = 'application/json';
     let response: Response;
+    // Text sends are quick, but media (RichMedia upload) can take much longer;
+    // a 5s cap made image sends look like a dead bridge.
+    const timeoutMs = path.startsWith('/api/send') ? 60_000 : 5_000;
     try {
       response = await fetch(`${this.#endpoint}${path}`, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);

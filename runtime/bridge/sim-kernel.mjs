@@ -2,7 +2,7 @@
  * Simulated QQ kernel.
  *
  * The event/message shapes deliberately mirror what the native kernel returns
- * (see the old bridge and napcat-core/apis): messages are
+ * (seen in local runtime observations): messages are
  *   { chatType, peerUid, senderUid, senderUin, msgId, msgSeq, msgTime,
  *     sendNickName, elements: [{ elementType, textElement } | { elementType, picElement }] }
  * and are normalised to OneBot shapes by the bridge server, i.e. the exact code

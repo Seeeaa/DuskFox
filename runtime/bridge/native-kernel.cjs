@@ -3,7 +3,7 @@
  * 真实 QQ 内核适配（在 QQ 进程内运行）。
  *
  * 这里所有调用都来自官方 wrapper.node 的 NodeIKernel*Service，形状参考本地
- * napcat-core/apis 与旧桥接源码；凡是未在实机上确认过的调用都标了
+ * 实机观测与旧桥接源码；凡是未在实机上确认过的调用都标了
  * 【待实机验证】，并通过 /api/status.pending_native 暴露给框架与控制台。
  *
  * 不修改 QQ 文件、不改变入口行为以外的东西；失败一律降级成状态，不让异常冒泡。
@@ -50,7 +50,7 @@ class NativeKernel {
     this.peerByMsgId = new Map();
     /** uin -> uid，来自好友列表；私聊发送必须用 uid。 */
     this.uidByUin = new Map();
-    /** 群列表事件缓存（NapCat 通过事件等待 getGroupList 的结果）。 */
+    /** 群列表事件缓存，供直接查询失败时使用。 */
     this.groupListCache = null;
     this.groupListenerReady = false;
     /** 好友/加群请求缓存：OneBot 的 flag 由 seq/reqTime 拼出。 */
@@ -110,7 +110,8 @@ class NativeKernel {
     } catch (error) {
       // 待实机：该方法在部分版本不存在，保留上一次值。
     }
-    this.online = Boolean(this.loginSucceeded && this.msfStatus === 2 && this.msgService);
+    // 会话就绪即在线；MSF 只作为诊断字段，不再作为在线前提。
+    this.online = Boolean(this.loginSucceeded && this.msgService);
   }
 
   status() {
@@ -118,7 +119,10 @@ class NativeKernel {
     return {
       uin: this.loginSucceeded ? this.uin : '',
       nick: this.loginSucceeded ? this.nick : '',
-      avatar: this.loginSucceeded ? this.avatar : '',
+      // 头像用 QQ 官方 qlogo 地址，由运行时（原生侧）生成。
+      avatar: this.loginSucceeded && /^\d+$/.test(String(this.uin))
+        ? 'https://q1.qlogo.cn/g?b=qq&nk=' + this.uin + '&s=640'
+        : this.avatar,
       online: this.online,
       authorized: this.loginSucceeded,
       msf: this.msfStatus,
@@ -249,6 +253,9 @@ class NativeKernel {
       candidate.addKernelMsgListener(listener);
       this.msgService = candidate;
       this.messageListener = listener;
+      // 扫码授权后会话已建立，直接进入在线（NC 行为），不等 MSF=2。
+      this.loginSucceeded = true;
+      this.online = true;
       this.attachRequestListeners(session);
       // 会话捕获不等于可收发；online 由 MSF=2 决定。
       this.refreshMsf();
@@ -330,6 +337,9 @@ class NativeKernel {
         guildId: '',
       });
     }
+    // 收到真实消息即证明消息通道可用，不再等 MSF=2。
+    this.loginSucceeded = this.loginSucceeded || Boolean(this.session);
+    this.online = true;
     this.emit({ type: 'message', native: message });
   }
 
@@ -392,7 +402,7 @@ class NativeKernel {
 
   /**
    * 图片发送：把文件按客户端的 RichMedia 约定复制到它要求的路径，再发 picElement。
-   * 与 NapCat 的做法一致（md5 + getRichMediaFilePathForGuild + copy）。
+   * 将文件复制到原生 RichMedia 路径，再构造图片元素。
    * 【待实机验证】字段齐全性（picWidth/picHeight/picType/picSubType）与复制目录。
    */
   async buildPicElement(file) {
@@ -405,16 +415,8 @@ class NativeKernel {
     const fileName = path.basename(file);
     const fileSize = buffer.length;
     const extension = path.extname(fileName).toLowerCase();
-    const picType =
-      extension === '.gif'
-        ? 2000
-        : extension === '.png'
-          ? 1001
-          : extension === '.webp'
-            ? 1002
-            : extension === '.bmp'
-              ? 1005
-              : 1000;
+    // 与 NC 一致：非 gif 一律用 NEWPIC_JPEG(1000)，不是按扩展名细分。
+    const picType = extension === '.gif' ? 2000 : 1000;
     const size = imageSizeOf(buffer);
     const service = this.msgService || (this.session && this.session.getMsgService());
     if (!service || typeof service.getRichMediaFilePathForGuild !== 'function') {
@@ -497,19 +499,28 @@ class NativeKernel {
   async friends() {
     const session = this.session || this.requireSession();
     const buddy = session.getBuddyService();
-    // 【待实机验证】getBuddyListV2 的参数与返回结构。
+    // getBuddyListV2 返回的是分组（category + buddyUids），不是用户行；
+    // 必须再用资料服务把 uid 映射成 uin/nick（与 NC 一致）。
     const result = await buddy.getBuddyListV2('0', true, 0);
-    const list = (result && (result.data || result.buddyList || [])) || [];
-    return list.map((item) => {
-      const uin = Number(item.uin || item.userUin || 0);
-      const uid = String(item.uid || '');
+    const categories = Array.isArray(result && result.data) ? result.data : [];
+    const uids = [...new Set(categories.flatMap((item) =>
+      Array.isArray(item && item.buddyUids) ? item.buddyUids.map(String) : []))];
+    if (uids.length === 0) return [];
+    const profile = session.getProfileService();
+    const infos = await profile.getCoreAndBaseInfo('nodeStore', uids);
+    if (!(infos instanceof Map)) throw new Error('好友资料服务未返回 UID 映射');
+    return uids.flatMap((uid) => {
+      const item = infos.get(uid);
+      if (!item) return [];
+      const core = item.coreInfo || {};
+      const uin = Number(item.uin || core.uin || 0);
       if (uin && uid) this.uidByUin.set(String(uin), uid);
-      return {
+      return [{
         user_id: uin,
-        nickname: String(item.nick || item.coreInfo?.nick || ''),
-        remark: String(item.remark || ''),
+        nickname: String(core.nick || ''),
+        remark: String(core.remark || ''),
         uid,
-      };
+      }];
     });
   }
 
@@ -517,12 +528,31 @@ class NativeKernel {
     const session = this.session || this.requireSession();
     this.attachRequestListeners(session);
     const groupService = session.getGroupService();
-    // 【待实机验证】NapCat 用事件等待 onGroupListUpdate；这里先取直接返回，
+    // 【待实机验证】可等待 onGroupListUpdate；这里先取直接返回，
     // 拿不到就等监听器缓存，避免返回空列表冒充成功。
     let list = null;
     try {
-      list = await groupService.getGroupList(false);
+      let raw = await groupService.getGroupList(false).catch(() => null);
+      if (!Array.isArray(raw) && !(raw && typeof raw === 'object')) {
+        raw = await groupService.getGroupList(true).catch(() => null);
+      }
+      const multi = raw && typeof raw === 'object' && [raw, raw.result].some((v) => v == null || typeof v === 'object');
+      // 【待实机验证】不同版本返回数组或 { groupList } / { result: { groupList } } / { result: { groupList } }。
+      list = Array.isArray(raw)
+        ? raw
+        : Array.isArray(raw && raw.groupList)
+          ? raw.groupList
+          : Array.isArray(raw && raw.result && raw.result.groupList)
+            ? raw.result.groupList
+            : Array.isArray(raw && raw.data && raw.data.groupList)
+              ? raw.data.groupList
+              : null;
+      if (!list) {
+        const shape = raw && typeof raw === 'object' ? JSON.stringify(Object.keys(raw)).slice(0, 300) : String(raw);
+        console.error('[bridge] getGroupList unknown shape:', shape, 'isArray=', Array.isArray(raw), 'multi=', multi);
+      }
     } catch (error) {
+      console.error('[bridge] getGroupList failed:', error && (error.message || error.name));
       list = null;
     }
     if (!Array.isArray(list)) {

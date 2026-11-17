@@ -63,7 +63,7 @@ export abstract class NetworkAdapter {
   /**
    * Fields that cannot change without rebinding the socket. Only a change here
    * forces a restart; editing a token or a display name is applied in place so
-   * bots stay connected (the behaviour NapCat's config hot reload provides).
+   * bots stay connected.
    */
   protected runtimeFingerprint(config: AnyConnection): string {
     return JSON.stringify(config);

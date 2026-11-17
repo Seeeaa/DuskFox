@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import { Application } from './app.ts';
 import { VERSION } from './version.ts';
 
-const HELP = `duskfox ${VERSION} — QQ → OneBot v11 连接器（Windows / Linux）
+const HELP = `DuskFox ${VERSION} — QQ → OneBot v11 连接器（Windows / Linux）
 
 用法：
   duskfox [选项]

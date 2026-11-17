@@ -1,7 +1,7 @@
 {
   "name": "duskfox",
-  "version": "0.5.0",
-  "description": "Cross-platform QQ → OneBot v11 connector with a web console (napcat-inspired architecture).",
+  "version": "0.6.0-alpha.1",
+  "description": "Cross-platform QQ to OneBot v11 connector with a web console.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "engines": {

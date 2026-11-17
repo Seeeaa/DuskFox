@@ -114,7 +114,7 @@ export class Application implements WebuiContext {
     const account = await this.driver.status();
     this.logger.info(
       'app',
-      `duskfox ${this.version} 已启动 · 驱动 ${this.driver.name} · 账号 ${account.online ? account.uin : '未登录'}`,
+      `DuskFox ${this.version} 已启动 · 驱动 ${this.driver.name} · 账号 ${account.online ? account.uin : '未登录'}`,
     );
     this.logger.info('app', `控制台：http://${this.#address.host}:${this.#address.port}`);
     this.logger.info('app', `管理令牌：${this.config.fileOf('webui')}`);
@@ -127,7 +127,7 @@ export class Application implements WebuiContext {
     await this.service.stop();
     await this.#console.stop();
     this.sessions.purge();
-    this.logger.info('app', 'duskfox 已停止');
+    this.logger.info('app', 'DuskFox 已停止');
   }
 
   /** Restart transports and the driver, keeping the console socket alive. */

@@ -15,7 +15,7 @@ const DEFAULT_CAPACITY = 5000;
 /**
  * Maps driver native message ids to the positive 32 bit ids OneBot clients see.
  *
- * Like napcat, no database is involved: a bounded table keeps roughly the last
+ * No database is involved: a bounded table keeps roughly the last
  * {@link capacity} messages, which is all a bot needs for recall and lookups.
  * `hash` mode derives the id from a digest so the same message keeps the same
  * id across restarts; `seq` mode hands out a monotonic counter.

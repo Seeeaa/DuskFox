@@ -11,7 +11,7 @@ const MAX_BODY = 1024 * 1024;
 /**
  * HTTP + WebSocket API server.
  *
- * One port serves both transports, like NapCat: `POST /send_msg` calls an
+ * One port serves both transports: `POST /send_msg` calls an
  * action, and when `enableWs` is on, an upgrade on `/api` yields an action-only
  * socket while any other path receives the event stream as well.
  */

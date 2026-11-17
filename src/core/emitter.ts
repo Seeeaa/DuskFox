@@ -60,7 +60,7 @@ export class Emitter<K extends string, M> {
   /**
    * Deliver a payload. Handlers run synchronously in registration order and a
    * throwing handler is isolated so one broken subscriber cannot break the
-   * account pipeline (mirrors the defensive dispatch used by napcat-core).
+   * account pipeline.
    */
   emit(type: K, payload: M): void {
     const direct = this.#handlers.get(type);

@@ -18,8 +18,8 @@ function base(ctx: EventContext, postType: Ob11EventBase['post_type'], extra: Re
 /**
  * Build `message` or `message_sent` events from an inbound driver message.
  *
- * OneBot defines `message_sent` for messages this account sent itself; NapCat
- * uses the same split, so frameworks that toggle `report_self_message` get the
+ * OneBot defines `message_sent` for messages this account sent itself;
+ * frameworks that toggle `report_self_message` get the
  * event type they expect instead of a normal `message` with a self sender.
  */
 export function buildMessageEvent(message: InboundMessage, ctx: EventContext): Ob11EventBase {
