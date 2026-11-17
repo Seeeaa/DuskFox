@@ -2,7 +2,7 @@ import { Type } from '@sinclair/typebox';
 import type { ActionContext, ActionDefinition } from './registry.ts';
 import { GroupIdSchema, MessageIdSchema, MessageSchema, UserIdSchema } from './registry.ts';
 import { ActionError, RETCODE } from '../types.ts';
-import { parseMessage } from '../segments.ts';
+import { formatMessage, parseMessage, toCqString } from '../segments.ts';
 import type { OutboundMessage, Scene, Segment } from '../../core/model.ts';
 
 interface SendParams {
@@ -41,6 +41,16 @@ async function send(scene: Scene, peerId: number, params: SendParams, context: A
   const result = await context.driver.sendMessage(outbound);
   context.stats.incMessagesOut();
   const numericId = context.messageIds.register(result.messageId, scene, String(peerId));
+  context.messages.save({
+    nativeId: result.messageId,
+    ob11Id: numericId,
+    scene,
+    peerId: String(peerId),
+    senderId: String(context.selfId() || ''),
+    time: Math.floor(Date.now() / 1000),
+    self: true,
+    segments,
+  });
   return { message_id: numericId };
 }
 
@@ -118,6 +128,29 @@ export const messageActions: Array<ActionDefinition<any, any>> = [
       }
       if (params.user_id === undefined) throw new ActionError('缺少 user_id', RETCODE.badParam);
       return send('private', params.user_id, params, context);
+    },
+  },
+  {
+    name: 'get_msg',
+    description: '按 message_id 查询最近收发的消息',
+    params: Type.Object({ message_id: MessageIdSchema }),
+    async handle(params: { message_id: number }, context: ActionContext) {
+      const record = context.messages.get(params.message_id);
+      if (!record) {
+        throw new ActionError('消息不存在或已超出保留窗口（最近 500 条）', RETCODE.notFound);
+      }
+      return {
+        message_id: record.ob11Id,
+        real_id: Number(record.nativeId) || 0,
+        message_type: record.scene,
+        ...(record.scene === 'group'
+          ? { group_id: Number(record.peerId) || 0 }
+          : { user_id: Number(record.peerId) || 0 }),
+        sender: { user_id: Number(record.senderId) || 0, nickname: record.senderName ?? '' },
+        time: record.time,
+        message: formatMessage(record.segments, context.config.messagePostFormat),
+        raw_message: toCqString(record.segments),
+      };
     },
   },
   {

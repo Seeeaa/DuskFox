@@ -48,9 +48,9 @@ test('反向 WS：连接、动作调用、事件推送与心跳', async () => {
 
     await instance.call('PUT', '/api/config', { onebot: { reportSelfMessage: true } });
     await instance.call('POST', '/api/action/send_private_msg', { user_id: 20001, message: '发给 bot 看' });
-    await waitFor(() => received.some((frame) => frame.post_type === 'message' && frame.message_type === 'private'), 5000);
-    const event = received.find((frame) => frame.post_type === 'message') as Record<string, any>;
-    assert.equal(event.sub_type, 'self');
+    await waitFor(() => received.some((frame) => frame.post_type === 'message_sent' && frame.message_type === 'private'), 5000);
+    const event = received.find((frame) => frame.post_type === 'message_sent') as Record<string, any>;
+    assert.equal(event.sub_type, 'friend');
     assert.equal(typeof event.message_id, 'number');
     assert.equal(Array.isArray(event.message), true);
     assert.equal(event.message[0].type, 'text');
@@ -58,8 +58,8 @@ test('反向 WS：连接、动作调用、事件推送与心跳', async () => {
 
     await instance.call('PUT', '/api/config', { onebot: { messagePostFormat: 'string' } });
     await instance.call('POST', '/api/action/send_private_msg', { user_id: 20001, message: '字符串格式' });
-    await waitFor(() => received.filter((frame) => frame.post_type === 'message').length >= 2, 5000);
-    const textEvent = received.filter((frame) => frame.post_type === 'message').at(-1) as Record<string, any>;
+    await waitFor(() => received.filter((frame) => frame.post_type === 'message_sent').length >= 2, 5000);
+    const textEvent = received.filter((frame) => frame.post_type === 'message_sent').at(-1) as Record<string, any>;
     assert.equal(typeof textEvent.message, 'string');
     assert.match(textEvent.message, /字符串格式/);
   } finally {
@@ -101,7 +101,7 @@ test('正向 WS 服务端：多个客户端都收到事件，动作按 echo 回�
 
     await instance.call('PUT', '/api/config', { onebot: { reportSelfMessage: true } });
     await instance.call('POST', '/api/action/send_private_msg', { user_id: 20001, message: 'broadcast' });
-    await waitFor(() => frames.filter((frame) => frame.post_type === 'message').length >= 2, 5000);
+    await waitFor(() => frames.filter((frame) => frame.post_type === 'message_sent').length >= 2, 5000);
     assert.equal(instance.app.service.clientCount() >= 2, true);
   } finally {
     for (const socket of sockets) socket.terminate();

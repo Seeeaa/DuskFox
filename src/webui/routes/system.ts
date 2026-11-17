@@ -71,7 +71,7 @@ export function registerSystemRoutes(router: Router, context: WebuiContext, guar
     }
     try {
       const info = await context.driver.processInfo();
-      sendJson(res, 200, { available: true, ...info });
+      sendJson(res, 200, { available: true, controllable: context.driver.controlProcess !== undefined, ...info });
     } catch (error) {
       // A runtime that is down is a normal state, not a server error.
       sendJson(res, 200, {

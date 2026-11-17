@@ -3,6 +3,7 @@ import { Value } from '@sinclair/typebox/value';
 import type { Logger } from '../../core/logger.ts';
 import type { OnebotConfig } from '../../core/config.ts';
 import type { MessageIdRegistry } from '../../core/message-id.ts';
+import type { MessageStore } from '../../core/message-store.ts';
 import type { Stats } from '../../core/stats.ts';
 import type { AccountStatus } from '../../core/model.ts';
 import type { AccountDriver, CapabilityKey } from '../../driver/types.ts';
@@ -13,6 +14,8 @@ export interface ActionContext {
   readonly config: OnebotConfig;
   readonly logger: Logger;
   readonly messageIds: MessageIdRegistry;
+  /** Recent messages for `get_msg`. */
+  readonly messages: MessageStore;
   readonly stats: Stats;
   readonly selfId: () => number;
   readonly online: () => boolean;

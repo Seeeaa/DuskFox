@@ -1,21 +1,47 @@
-MIT License
-
+duskfox 源码可用许可（非商业）v1.0
+duskfox Source-Available License (Non-Commercial) v1.0
 Copyright (c) 2026 duskfox contributors
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+【中文】
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. 许可范围
+   在遵守本许可全部条款的前提下，你被允许：阅读、复制、修改本软件源码，
+   并在非商业目的下自用、研究、教学或内部测试。
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. 非商业限制
+   未经版权持有人事先书面授权，不得将本软件（含修改版、衍生作品、编译产物）
+   用于任何商业目的，包括但不限于：出售、付费分发、随商业产品分发、
+   作为付费服务或托管服务的组成部分、以本软件为基础提供付费技术支持。
+
+3. 再分发
+   允许在非商业目的下再分发本软件或其修改版，但必须：保留本许可全文、
+   保留版权声明、注明所做的修改，且不得移除或规避本许可的限制。
+   公开分发修改版或衍生作品前，须取得版权持有人的书面许可。
+
+4. 不得据以开发竞品
+   未经版权持有人事先书面授权，不得基于本软件的全部或实质部分开发、
+   发布或分发另一个同类项目。
+
+5. 第三方与运行时
+   本软件不包含、不分发任何 QQ 客户端文件、原生注入组件或其他第三方专有二进制。
+   真实 QQ 会话需要由使用者自行准备并自行承担合规责任；本项目与腾讯无隶属关系。
+
+6. 无担保与责任限制
+   本软件按“现状”提供，不附带任何明示或默示担保。作者不对使用本软件造成的
+   任何直接或间接损失承担责任。
+
+7. 终止
+   违反本许可任一 条款时，本许可自动终止，你必须立即停止使用并删除全部副本。
+
+8. 说明
+   本许可不是 OSI 认可的开源许可。若你需要商用授权，请联系版权持有人。
+
+【English summary】
+Source-available, non-commercial. You may read, copy, modify and use the source for
+non-commercial purposes. Selling, paid distribution, bundling into commercial products,
+or offering paid services based on this software requires prior written permission.
+Redistribution must keep this license and attribution; public release of modified or
+derivative versions requires prior written permission. You may not use the software to
+develop and distribute a competing project. This is not an OSI-approved open-source
+license. No warranty. This project is not affiliated with Tencent; no QQ client files or
+proprietary native components are included or distributed.

@@ -3,6 +3,8 @@ import os from 'node:os';
 import type { AccountDriver, Capabilities, DriverContext, DriverOptions, SendResult } from './types.ts';
 import { capabilityMap } from './types.ts';
 import type {
+  AccountNotice,
+  AccountRequest,
   AccountStatus,
   Friend,
   Group,
@@ -48,6 +50,8 @@ export class MockDriver implements AccountDriver {
     privateMessage: true,
     groupMessage: true,
     mediaImage: true,
+    mediaRecord: true,
+    mediaVideo: true,
     mediaFile: true,
     reply: true,
     at: true,
@@ -56,8 +60,12 @@ export class MockDriver implements AccountDriver {
     recall: true,
     friendList: true,
     groupList: true,
+    groupInfo: true,
     strangerInfo: true,
     groupMemberInfo: true,
+    groupMemberList: true,
+    messageQuery: true,
+    requestHandle: true,
     processControl: true,
     qrLogin: true,
     quickLogin: true,
@@ -206,14 +214,50 @@ export class MockDriver implements AccountDriver {
   }
 
   async groupMemberInfo(groupId: string, userId: string): Promise<GroupMember> {
+    return this.#member(groupId, userId);
+  }
+
+  async groupMemberList(groupId: string): Promise<GroupMember[]> {
+    const members: GroupMember[] = [this.#member(groupId, MOCK_UIN)];
+    for (const friend of FRIENDS) members.push(this.#member(groupId, friend.id));
+    return members;
+  }
+
+  async handleRequest(input: {
+    readonly flag: string;
+    readonly approve: boolean;
+    readonly type: 'friend' | 'group';
+    readonly subType?: string;
+  }): Promise<void> {
+    this.#context.logger.info(
+      'driver:mock',
+      `模拟处理${input.type === 'friend' ? '好友' : '群'}请求：${input.approve ? '同意' : '拒绝'} flag=${input.flag}`,
+    );
+  }
+
+  /** Test helper: push a notice through the driver pipeline. */
+  emitNotice(notice: AccountNotice): void {
+    this.#context.emit({ type: 'notice', notice });
+  }
+
+  /** Test helper: push a join request through the driver pipeline. */
+  emitRequest(request: AccountRequest): void {
+    this.#context.emit({ type: 'request', request });
+  }
+
+  #member(groupId: string, userId: string): GroupMember {
     const friend = FRIENDS.find((entry) => entry.id === userId);
     return {
       groupId,
       userId,
       name: friend?.name ?? `成员 ${userId}`,
-      card: '',
+      ...(friend ? { card: friend.name } : {}),
       role: userId === MOCK_UIN ? 'owner' : 'member',
     };
+  }
+
+  qrInfo(): { refreshable: boolean; loginMode: 'active' | 'passive' | 'unknown' } {
+    return { refreshable: true, loginMode: 'active' };
   }
 
   async processInfo(): Promise<ProcessInfo> {
@@ -266,7 +310,7 @@ export class MockDriver implements AccountDriver {
     const seed = `${MOCK_UIN}:${this.#qrSeq}:${Date.now()}`;
     const { dataUrl } = syntheticQr(seed);
     const expiresAt = Date.now() + QR_TTL_MS;
-    this.#qr = { state: 'waiting', image: dataUrl, expiresAt, seq: this.#qrSeq };
+    this.#qr = { state: 'waiting', image: dataUrl, expiresAt, seq: this.#qrSeq, refreshable: true, loginMode: 'active' };
     this.#context.emit({ type: 'qr', qr: this.#qr });
     this.#qrTimer = setTimeout(() => {
       if (this.#qr.state !== 'waiting') return;
