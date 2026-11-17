@@ -634,7 +634,7 @@ var S={demo:'normal',stat:{rx:0,tx:0,conn:0,epm:0},
  ob:{fmt:'array',reportSelf:false,heartbeat:30000,idMode:'hash',debug:false,ignoreGroup:false},
  evt:{privateMessage:true,groupMessage:true,metaEvent:true,notice:true,request:true},
  caps:[],actions:[],endpoints:[],paths:{},app:{},conns:[],online:false,selfId:0,
- qr:{state:'none',seq:0},cwd:'/',sel:null,startedAt:Date.now()};
+ qr:{state:'none',seq:0},cwd:'/',sel:null,startedAt:Date.now(),login:{qr:false,quick:false,password:false}};
 
 var EV=[],LG=[],subs=[];
 var DF=window.duskfox={signal:{rxp:0,txp:0,vals:[],rx:[],tx:[],tick:0,push:function(n,k){if(k==='tx')DF.signal.txp+=n;else DF.signal.rxp+=n}}};
@@ -679,6 +679,7 @@ function applyStatus(d){
   if(d.capabilities)S.caps=d.capabilities;
   if(d.endpoints){S.endpoints=d.endpoints;S.procAvail=d.endpoints.some(function(e){return e.path==='/api/process'&&e.wired})}
   if(d.webui)S.webui=Object.assign({},S.webui||{},d.webui);
+  if(d.login)S.login=d.login;
   S.demo='normal';
 }
 function applyConfig(d){
@@ -879,7 +880,15 @@ P.account={n:'账号',r:function(){
     return;
    }
    if(t==='pw'){
-    b.innerHTML='<div class="note">当前驱动不支持账号密码登录，也不会在本页保存密码。</div><div class="ff">'+fld('QQ 号','','u',{dis:1})+fld('密码','','p',{dis:1,type:'password'})+'</div><button class="btn" disabled>登录</button>';
+    var canPw=!!(S.login&&S.login.password);
+    if(!canPw){
+     b.innerHTML='<div class="note">当前驱动未启用密码登录（运行时需设置 QQ_BRIDGE_PASSWORD_LOGIN=1）。本页不会保存密码。</div><div class="ff">'+fld('QQ 号','','u',{dis:1})+fld('密码','','p',{dis:1,type:'password'})+'</div><button class="btn" disabled>登录</button>';
+     return;
+    }
+    b.innerHTML='<div class="note">密码只用于本次登录请求，运行时在内存中转换为 MD5，不写入配置与日志。若触发设备验证，请按提示在手机 QQ 上确认。</div>'+
+     '<div class="ff"><label class="fld"><span>QQ 号</span><input id="pwu" inputmode="numeric" autocomplete="off" placeholder="输入测试号"></label>'+
+     '<label class="fld"><span>密码</span><input id="pwp" type="password" autocomplete="off" placeholder="输入密码"></label></div>'+
+     '<button class="btn" data-act="pwlogin">登录</button>';
     return;
    }
    b.innerHTML='<div class="row" style="gap:32px;align-items:flex-start"><div class="qr" id="qr"><img id="qri" alt="登录二维码"></div><div style="flex:1;min-width:220px"><p>使用手机 QQ 扫描二维码。<span class="src" id="qrmode" style="margin-left:8px"></span></p><p class="muted" style="font-size:13px;margin:6px 0 18px" id="qrhint">正在获取二维码…</p><button class="btn s" id="qrf" data-act="qrrefresh">刷新二维码</button></div></div>';
@@ -1370,6 +1379,20 @@ async function handleAct(a,e){
   var f=$('#ntk');if(!f)return;
   var nv=f.value.trim();
   return withBusy(a,'更新中',async function(){var d=await api('PUT','/api/security/token',{token:nv});setTok(d.token);f.value='';toast('令牌已更新','旧令牌立即失效，当前会话继续有效')});
+ }
+ if(act==='pwlogin'){
+  var u=$('#pwu'),p=$('#pwp');
+  if(!u||!p)return;
+  var uin=u.value.trim(),pw=p.value;
+  if(!uin||!pw){toast('请填写 QQ 号与密码');return}
+  return withBusy(a,'登录中',async function(){
+   try{
+    await api('POST','/api/account/login',{method:'password',uin:uin,password:pw});
+    p.value='';
+    toast('已提交密码登录','若触发设备验证，请按运行时提示操作');
+    loadStatus().then(function(){if(cur==='account')render()}).catch(function(){});
+   }catch(err){toast('登录失败',(err&&err.message)||'')}
+  });
  }
  if(act==='logdl'){
   return withBusy(a,'准备中',async function(){

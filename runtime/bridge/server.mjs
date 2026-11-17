@@ -77,8 +77,8 @@ export function createBridgeServer(options) {
 
   const contractVersion = 2;
   /** Which segments this runtime can send / receive, direction is explicit. */
-  const sendSegments = ['text', 'image'];
-  const recvSegments = ['text', 'image', 'face', 'at', 'reply'];
+  const sendSegments = (kernel && kernel.sendSegments) || ['text', 'image'];
+  const recvSegments = (kernel && kernel.recvSegments) || ['text', 'image', 'face', 'at', 'reply'];
   const features = {
     privateMessage: true,
     groupMessage: true,
@@ -94,6 +94,9 @@ export function createBridgeServer(options) {
     mediaRecord: false,
     mediaVideo: false,
     mediaFile: false,
+    passwordLogin: Boolean(kernel && kernel.passwordLoginEnabled),
+    quickLogin: false,
+    logout: false,
   };
 
   function note(message) {
@@ -237,6 +240,23 @@ export function createBridgeServer(options) {
         return send(200, { ...payload, hint, phase: computePhase() });
       }
       return send(200, { ...payload, phase: computePhase(), login_mode: pumpEnabled ? 'active' : 'passive' });
+    }
+
+    if (url.pathname === '/api/login' && request.method === 'POST') {
+      if (!kernel.login) return send(501, { error: '运行时未实现密码登录' });
+      let body;
+      try {
+        body = JSON.parse(bodyText || '{}');
+      } catch {
+        return send(400, { error: '请求体不是合法 JSON' });
+      }
+      if (body.method !== 'password') return send(400, { error: 'method 只能是 password' });
+      try {
+        await kernel.login({ method: 'password', uin: String(body.uin ?? ''), password: String(body.password ?? '') });
+        return send(202, { accepted: true });
+      } catch (error) {
+        return send(502, { error: error instanceof Error ? error.message : String(error) });
+      }
     }
 
     if (url.pathname === '/api/qr/refresh' && request.method === 'POST') {

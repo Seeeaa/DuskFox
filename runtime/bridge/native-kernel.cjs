@@ -34,6 +34,20 @@ class NativeKernel {
     this.peerByMsgId = new Map();
     /** uin -> uid，来自好友列表；私聊发送必须用 uid。 */
     this.uidByUin = new Map();
+    /** 群列表事件缓存（NapCat 通过事件等待 getGroupList 的结果）。 */
+    this.groupListCache = null;
+    this.groupListenerReady = false;
+    /** 好友/加群请求缓存：OneBot 的 flag 由 seq/reqTime 拼出。 */
+    this.friendRequests = new Map();
+    this.groupNotices = new Map();
+    this.requestListenerReady = false;
+    /**
+     * 发送哪些消息段由实机验证状态决定：图片发送代码已实现，但 RichMedia
+     * 行为未在真实客户端确认，默认不对外声明；设 QQ_BRIDGE_IMAGE_SEND=1 再打开。
+     */
+    this.sendSegments = process.env.QQ_BRIDGE_IMAGE_SEND === '1' ? ['text', 'image'] : ['text'];
+    /** 密码登录默认关闭，需显式开启（参数与回调仍待实机验证）。 */
+    this.passwordLoginEnabled = process.env.QQ_BRIDGE_PASSWORD_LOGIN === '1';
     this.pendingNative = [
       'recallMsg(peer,[msgId])',
       'getBuddyListV2 返回结构',
@@ -44,6 +58,9 @@ class NativeKernel {
       'getMsfStatus()===2 作为在线判据',
       'getMsgsByMsgId(peer,[msgId]) 的返回结构',
       'uin -> uid 解析（好友列表）',
+      '图片发送：RichMedia 目录 + picElement(picWidth/picHeight/picType/picSubType)',
+      'passwordLogin 的参数（uin/passwordMd5/空 Uint8Array）与回调时序',
+      'onBuddyReqChange / onGroupNotifiesUpdated 的事件形状与 flag 映射',
     ];
     this.attachTimer = null;
     this.msgTimer = null;
@@ -170,6 +187,7 @@ class NativeKernel {
           for (const message of messages) self.onNativeMessage(message);
         },
       });
+      this.attachRequestListeners(session);
       this.online = true;
       try {
         const msf = this.loginService && this.loginService.getMsfStatus();
@@ -179,6 +197,43 @@ class NativeKernel {
       }
     } catch (error) {
       // 会话尚未建立：下一轮重试。
+    }
+  }
+
+  /**
+   * 好友/加群请求的监听与缓存。
+   * OneBot 的 flag 是运行时自己生成的标识，确认时要用它找回原生通知对象。
+   * 【待实机验证】onBuddyReqChange / onGroupNotifiesUpdated 的事件字段。
+   */
+  attachRequestListeners(session) {
+    if (this.requestListenerReady) return;
+    try {
+      session.getBuddyService().addKernelBuddyListener({
+        onBuddyReqChange: (data) => {
+          const list = data && (data.RequestList || data.requestList || []);
+          for (const item of Array.isArray(list) ? list : []) {
+            if (!item || !item.friendUid) continue;
+            const flag = 'friend|' + item.friendUid + '|' + (item.reqTime || '');
+            this.friendRequests.set(flag, { friendUid: String(item.friendUid), reqTime: String(item.reqTime || '') });
+          }
+        },
+      });
+      session.getGroupService().addKernelGroupListener({
+        onGroupListUpdate: (list) => {
+          if (Array.isArray(list)) this.groupListCache = list;
+        },
+        onGroupNotifiesUpdated: (_doubt, notifications) => {
+          for (const item of Array.isArray(notifications) ? notifications : []) {
+            if (!item || !item.seq) continue;
+            const flag = 'group|' + item.seq + '|' + item.type + '|' + (item.group && item.group.groupCode);
+            this.groupNotices.set(flag, item);
+          }
+        },
+      });
+      this.groupListenerReady = true;
+      this.requestListenerReady = true;
+    } catch (error) {
+      // 监听器注册失败不影响主链路；下一轮 attachMessages 再试。
     }
   }
 
@@ -237,21 +292,7 @@ class NativeKernel {
           textElement: { content: String(segment.data.text ?? ''), atType: 0, atUid: '', atTinyId: '', atNtUid: '' },
         });
       } else if (segment.type === 'image') {
-        const file = String(segment.data.file ?? '');
-        const path = require('node:path');
-        const fs = require('node:fs');
-        if (!fs.existsSync(file)) throw new Error('图片文件不存在：' + file);
-        // 【待实机验证】客户端是否接受本地 filePath 并自行上传到 RichMedia。
-        elements.push({
-          elementType: ELEMENT_PIC,
-          elementId: '',
-          picElement: {
-            fileName: path.basename(file),
-            fileSize: String(fs.statSync(file).size),
-            filePath: path.resolve(file),
-            md5HexStr: '',
-          },
-        });
+        elements.push(await this.buildPicElement(String(segment.data.file ?? '')));
       } else {
         throw new Error('原生内核暂不支持该消息段：' + segment.type);
       }
@@ -261,6 +302,97 @@ class NativeKernel {
     if (!result || result.result !== 0) throw new Error('sendMsg 返回 ' + JSON.stringify(result));
     // 【待实机验证】sendMsg 的返回是否直接含 msgId；旧桥接用自增游标占位。
     return { messageId: String(result.msgId || result.msgSeq || Date.now()) };
+  }
+
+  /**
+   * 图片发送：把文件按客户端的 RichMedia 约定复制到它要求的路径，再发 picElement。
+   * 与 NapCat 的做法一致（md5 + getRichMediaFilePathForGuild + copy）。
+   * 【待实机验证】字段齐全性（picWidth/picHeight/picType/picSubType）与复制目录。
+   */
+  async buildPicElement(file) {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const crypto = require('node:crypto');
+    if (!file || !fs.existsSync(file)) throw new Error('图片文件不存在：' + file);
+    const buffer = fs.readFileSync(file);
+    const md5 = crypto.createHash('md5').update(buffer).digest('hex');
+    const fileName = path.basename(file);
+    const fileSize = buffer.length;
+    const extension = path.extname(fileName).toLowerCase();
+    const picType =
+      extension === '.gif'
+        ? 2000
+        : extension === '.png'
+          ? 1001
+          : extension === '.webp'
+            ? 1002
+            : extension === '.bmp'
+              ? 1005
+              : 1000;
+    const size = imageSizeOf(buffer);
+    const service = this.msgService || (this.session && this.session.getMsgService());
+    if (!service || typeof service.getRichMediaFilePathForGuild !== 'function') {
+      throw new Error('客户端未提供 RichMedia 路径接口，图片发送待实机验证');
+    }
+    const mediaPath = service.getRichMediaFilePathForGuild({
+      md5HexStr: md5,
+      fileName,
+      elementType: ELEMENT_PIC,
+      elementSubType: 0,
+      thumbSize: 0,
+      needCreate: true,
+      downloadType: 1,
+      file_uuid: '',
+    });
+    fs.mkdirSync(path.dirname(mediaPath), { recursive: true });
+    fs.copyFileSync(file, mediaPath);
+    return {
+      elementType: ELEMENT_PIC,
+      elementId: '',
+      picElement: {
+        md5HexStr: md5,
+        fileSize: String(fileSize),
+        picWidth: size.width,
+        picHeight: size.height,
+        fileName,
+        sourcePath: mediaPath,
+        original: true,
+        picType,
+        picSubType: 0,
+        fileUuid: '',
+        fileSubId: '',
+        thumbFileSize: 0,
+        summary: '',
+      },
+    };
+  }
+
+  /**
+   * 密码登录。密码只在运行时内存里转成 md5，不落盘、不写日志。
+   * 【待实机验证】passwordLogin 的参数、错误码与后续 onLoginConnected 时序。
+   */
+  async login({ method, uin, password }) {
+    if (method !== 'password') throw new Error('原生内核仅实现密码登录');
+    if (!this.loginService) throw new Error('登录服务尚未就绪');
+    if (!/^\d{5,12}$/.test(String(uin || ''))) throw new Error('QQ 号格式不正确');
+    if (typeof password !== 'string' || password.length === 0) throw new Error('密码不能为空');
+    const crypto = require('node:crypto');
+    const passwordMd5 = crypto.createHash('md5').update(password, 'utf8').digest('hex');
+    const res = await this.loginService.passwordLogin({
+      uin: String(uin),
+      passwordMd5,
+      step: 0,
+      newDeviceLoginSig: new Uint8Array(),
+      proofWaterSig: new Uint8Array(),
+      proofWaterRand: new Uint8Array(),
+      proofWaterSid: new Uint8Array(),
+      unusualDeviceCheckSig: new Uint8Array(),
+    });
+    const code = String((res && res.result) ?? '');
+    if (code === '140022008') throw new Error('需要验证码（proofWaterUrl），当前版本未实现验证码流程');
+    if (code === '140022010') throw new Error('新设备需要扫码验证（jumpUrl），请先用扫码登录一次');
+    if (code && code !== '0' && code !== 'undefined') throw new Error('密码登录失败：' + code);
+    return { accepted: true };
   }
 
   async recall(messageId) {
@@ -295,10 +427,25 @@ class NativeKernel {
 
   async groups() {
     const session = this.session || this.requireSession();
+    this.attachRequestListeners(session);
     const groupService = session.getGroupService();
-    // 【待实机验证】直接调用是否返回数组（NapCat 用事件等待）。
-    const list = await groupService.getGroupList(false);
-    return (Array.isArray(list) ? list : []).map((item) => ({
+    // 【待实机验证】NapCat 用事件等待 onGroupListUpdate；这里先取直接返回，
+    // 拿不到就等监听器缓存，避免返回空列表冒充成功。
+    let list = null;
+    try {
+      list = await groupService.getGroupList(false);
+    } catch (error) {
+      list = null;
+    }
+    if (!Array.isArray(list)) {
+      const deadline = Date.now() + 3000;
+      while (!this.groupListCache && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      list = this.groupListCache;
+    }
+    if (!Array.isArray(list)) throw new Error('群列表尚未就绪（等待 onGroupListUpdate 超时）');
+    return list.map((item) => ({
       group_id: Number(item.groupCode || 0),
       group_name: String(item.groupName || ''),
       member_count: Number(item.memberCount || 0),
@@ -337,21 +484,32 @@ class NativeKernel {
 
   async handleRequest(input) {
     const session = this.session || this.requireSession();
-    // 【待实机验证】好友/加群请求的确认接口名与参数。
     if (input.type === 'friend') {
+      const hit = this.friendRequests.get(input.flag);
+      if (!hit) throw new Error('好友请求已失效（运行时未缓存该 flag）');
+      // 【待实机验证】accept 期望 boolean。
       await session.getBuddyService().approvalFriendRequest({
-        friendUid: input.flag,
-        reqTime: '',
-        accept: input.approve ? 1 : 0,
+        friendUid: hit.friendUid,
+        reqTime: hit.reqTime,
+        accept: Boolean(input.approve),
       });
-    } else {
-      await session.getGroupService().operateGroupJoinRequest(0, {
-        groupCode: input.flag,
-        type: input.subType === 'invite' ? 1 : 0,
-        isReject: !input.approve,
-        msg: '',
-      });
+      this.friendRequests.delete(input.flag);
+      return true;
     }
+    const notice = this.groupNotices.get(input.flag);
+    if (!notice) throw new Error('加群请求已失效（运行时未缓存该 flag）');
+    // 【待实机验证】operateSysNotify 的 operateType 取值。
+    const operateType = input.approve ? 1 : 2;
+    await session.getGroupService().operateSysNotify(Boolean(notice.doubt), {
+      operateType,
+      targetMsg: {
+        seq: notice.seq,
+        type: notice.type,
+        groupCode: notice.group && notice.group.groupCode,
+        postscript: ' ',
+      },
+    });
+    this.groupNotices.delete(input.flag);
     return true;
   }
 
@@ -359,6 +517,29 @@ class NativeKernel {
     if (this.session) return this.session;
     throw new Error('会话尚未就绪');
   }
+}
+
+/** Minimal PNG/JPEG dimension reader; returns 0x0 for unknown formats. */
+function imageSizeOf(buffer) {
+  if (buffer.length > 24 && buffer.readUInt32BE(0) === 0x89504e47) {
+    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  }
+  if (buffer.length > 4 && buffer[0] === 0xff && buffer[1] === 0xd8) {
+    let offset = 2;
+    while (offset < buffer.length - 9) {
+      if (buffer[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = buffer[offset + 1];
+      const length = buffer.readUInt16BE(offset + 2);
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { width: buffer.readUInt16BE(offset + 7), height: buffer.readUInt16BE(offset + 5) };
+      }
+      offset += 2 + length;
+    }
+  }
+  return { width: 0, height: 0 };
 }
 
 module.exports = { NativeKernel, ELEMENT_TEXT, ELEMENT_PIC };

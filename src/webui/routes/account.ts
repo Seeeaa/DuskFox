@@ -20,8 +20,23 @@ export function registerAccountRoutes(router: Router, context: WebuiContext): vo
 
   router.post('/api/account/login', async ({ res, body }) => {
     const payload = await body();
+    if (payload.method === 'password') {
+      if (!context.driver.capabilities.passwordLogin) throw new HttpError(501, '当前驱动不支持密码登录');
+      const uin = typeof payload.uin === 'string' ? payload.uin.trim() : '';
+      const password = typeof payload.password === 'string' ? payload.password : '';
+      if (!/^\d{5,12}$/.test(uin)) throw new HttpError(400, 'QQ 号格式不正确');
+      if (!password) throw new HttpError(400, '密码不能为空');
+      context.logger.warn('webui', `控制台发起密码登录（uin=${uin}）`);
+      try {
+        await context.driver.login({ method: 'password', uin, password });
+      } catch (error) {
+        throw new HttpError(502, error instanceof Error ? error.message : String(error));
+      }
+      sendJson(res, 200, { ok: true, method: 'password' });
+      return;
+    }
     const method = payload.method === 'quick' ? 'quick' : payload.method === 'qr' ? 'qr' : null;
-    if (!method) throw new HttpError(400, 'method 只能是 qr 或 quick');
+    if (!method) throw new HttpError(400, 'method 只能是 qr、quick 或 password');
     if (method === 'quick' && !context.driver.capabilities.quickLogin) {
       throw new HttpError(501, '当前驱动不支持快速登录');
     }
