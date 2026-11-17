@@ -5,6 +5,34 @@ import { ActionError, RETCODE } from '../types.ts';
 import { formatMessage, parseMessage, toCqString } from '../segments.ts';
 import type { OutboundMessage, Scene, Segment } from '../../core/model.ts';
 
+interface MessageShape {
+  readonly ob11Id: number;
+  readonly nativeId: string;
+  readonly scene: Scene;
+  readonly peerId: string;
+  readonly senderId: string;
+  readonly senderName?: string;
+  readonly time: number;
+  readonly segments: readonly Segment[];
+  readonly format: 'array' | 'string';
+}
+
+/** The exact payload `get_msg` returns, whether from the window or the runtime. */
+function shapeMessage(input: MessageShape): Record<string, unknown> {
+  return {
+    message_id: input.ob11Id,
+    real_id: Number(input.nativeId) || 0,
+    message_type: input.scene,
+    ...(input.scene === 'group'
+      ? { group_id: Number(input.peerId) || 0 }
+      : { user_id: Number(input.peerId) || 0 }),
+    sender: { user_id: Number(input.senderId) || 0, nickname: input.senderName ?? '' },
+    time: input.time,
+    message: formatMessage(input.segments, input.format),
+    raw_message: toCqString(input.segments),
+  };
+}
+
 interface SendParams {
   readonly message_type?: 'private' | 'group';
   readonly user_id?: number;
@@ -136,21 +164,41 @@ export const messageActions: Array<ActionDefinition<any, any>> = [
     params: Type.Object({ message_id: MessageIdSchema }),
     async handle(params: { message_id: number }, context: ActionContext) {
       const record = context.messages.get(params.message_id);
-      if (!record) {
-        throw new ActionError('消息不存在或已超出保留窗口（最近 500 条）', RETCODE.notFound);
+      if (record) {
+        return shapeMessage({
+          ob11Id: record.ob11Id,
+          nativeId: record.nativeId,
+          scene: record.scene,
+          peerId: record.peerId,
+          senderId: record.senderId,
+          senderName: record.senderName,
+          time: record.time,
+          segments: record.segments,
+          format: context.config.messagePostFormat,
+        });
       }
-      return {
-        message_id: record.ob11Id,
-        real_id: Number(record.nativeId) || 0,
-        message_type: record.scene,
-        ...(record.scene === 'group'
-          ? { group_id: Number(record.peerId) || 0 }
-          : { user_id: Number(record.peerId) || 0 }),
-        sender: { user_id: Number(record.senderId) || 0, nickname: record.senderName ?? '' },
-        time: record.time,
-        message: formatMessage(record.segments, context.config.messagePostFormat),
-        raw_message: toCqString(record.segments),
-      };
+
+      // The message fell out of the local window; ask the runtime (contract v2)
+      // before admitting we cannot answer. Legacy runtimes return null here.
+      const nativeId = context.messageIds.nativeIdOf(params.message_id);
+      if (nativeId && context.driver.fetchMessage) {
+        const fetched = await context.driver.fetchMessage(nativeId);
+        if (fetched) {
+          const ob11Id = context.messageIds.register(fetched.messageId, fetched.scene, fetched.peer.id);
+          return shapeMessage({
+            ob11Id,
+            nativeId: fetched.messageId,
+            scene: fetched.scene,
+            peerId: fetched.peer.id,
+            senderId: fetched.sender.id,
+            senderName: fetched.sender.name,
+            time: fetched.time,
+            segments: fetched.segments,
+            format: context.config.messagePostFormat,
+          });
+        }
+      }
+      throw new ActionError('消息不存在：本地窗口（最近 500 条）已淘汰，且运行时无法按该 ID 查询', RETCODE.notFound);
     },
   },
   {

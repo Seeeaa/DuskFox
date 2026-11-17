@@ -74,6 +74,51 @@ export class Sessions {
   }
 }
 
+/**
+ * Short-lived, scoped URL tickets.
+ *
+ * Downloads and SSE cannot send headers (an <a> and EventSource both cannot),
+ * so the old code put the session token in the query string — which leaks the
+ * session into history, referrers and proxy logs. A ticket is scoped to one
+ * purpose, expires in a minute, and is useless anywhere else.
+ */
+export class Tickets {
+  readonly #items = new Map<string, { scope: string; expiresAt: number }>();
+
+  issue(scope: string, ttlMs = 60_000): { ticket: string; expiresAt: number } {
+    const ticket = createToken(18);
+    const expiresAt = Date.now() + ttlMs;
+    this.#items.set(ticket, { scope, expiresAt });
+    this.purge();
+    return { ticket, expiresAt };
+  }
+
+  /** True when the ticket is valid for exactly this scope and not expired. */
+  redeem(ticket: string, scope: string): boolean {
+    const item = this.#items.get(ticket);
+    if (!item) return false;
+    if (item.expiresAt < Date.now()) {
+      this.#items.delete(ticket);
+      return false;
+    }
+    return item.scope === scope;
+  }
+
+  purge(): void {
+    const now = Date.now();
+    for (const [id, item] of this.#items) {
+      if (item.expiresAt < now) this.#items.delete(id);
+    }
+  }
+}
+
+/** Query parameter names and the purpose they unlock. */
+export const TICKET_ROUTES: Readonly<Record<string, string>> = {
+  '/api/logs/download': 'logs.download',
+  '/api/config/export': 'config.export',
+  '/api/stream': 'stream',
+};
+
 /** Per address login throttle, keeps brute force cheap to repel. */
 export class LoginGuard {
   readonly #failures = new Map<string, { count: number; resetAt: number }>();
@@ -111,11 +156,14 @@ export function isAdminToken(supplied: string, admin: string): boolean {
   return tokenEquals(supplied, admin);
 }
 
-/** Pull a bearer token from headers or the `token` query parameter. */
-export function extractToken(headers: Record<string, string | string[] | undefined>, url: URL): string {
+/**
+ * Read the session token from the Authorization header only.
+ *
+ * Query-string tokens are no longer accepted: URL-borne credentials end up in
+ * history, referrers and logs. Use a scoped ticket instead (see Tickets).
+ */
+export function extractToken(headers: Record<string, string | string[] | undefined>): string {
   const header = headers.authorization;
   const value = Array.isArray(header) ? header[0] : header;
-  const bearer = value?.replace(/^Bearer\s+/i, '').trim() ?? '';
-  if (bearer) return bearer;
-  return (url.searchParams.get('token') ?? url.searchParams.get('access_token') ?? '').trim();
+  return value?.replace(/^Bearer\s+/i, '').trim() ?? '';
 }

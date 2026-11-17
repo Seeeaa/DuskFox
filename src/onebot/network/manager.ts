@@ -37,6 +37,7 @@ export class NetworkManager {
   readonly #logger: Logger;
   readonly #network: () => NetworkConfig;
   readonly #adapters = new Map<string, NetworkAdapter>();
+  readonly #retries = new Map<string, { timer: NodeJS.Timeout; attempts: number }>();
   #started = false;
 
   constructor(host: NetworkHost, logger: Logger, network: () => NetworkConfig) {
@@ -59,6 +60,7 @@ export class NetworkManager {
 
   async stop(): Promise<void> {
     this.#started = false;
+    for (const key of [...this.#retries.keys()]) this.#clearRetry(key);
     const adapters = [...this.#adapters.values()];
     this.#adapters.clear();
     await Promise.all(adapters.map((adapter) => adapter.stop().catch((error: unknown) => {
@@ -96,9 +98,16 @@ export class NetworkManager {
         await this.#spawn(target.kind, target.config);
         continue;
       }
-      const needsRestart = existing.applyConfig(target.config);
+      const errored = (() => {
+        try {
+          return existing.info().status === 'error';
+        } catch {
+          return true;
+        }
+      })();
+      const needsRestart = existing.applyConfig(target.config) || errored;
       if (needsRestart) {
-        this.#logger.info('net', `${target.kind} 绑定参数变更，正在重启`);
+        this.#logger.info('net', `${target.kind} 重启（${errored ? '上次启动失败' : '绑定参数变更'}）`);
         await this.#despawn(key);
         await this.#spawn(target.kind, target.config);
       }
@@ -149,12 +158,15 @@ export class NetworkManager {
     this.#adapters.set(key, adapter);
     try {
       await adapter.start();
+      this.#clearRetry(key);
     } catch (error) {
       this.#logger.failure('net', `${kind} ${config.name || config.id} 启动失败`, error);
+      this.#scheduleRetry(key);
     }
   }
 
   async #despawn(key: string): Promise<void> {
+    this.#clearRetry(key);
     const adapter = this.#adapters.get(key);
     if (!adapter) return;
     this.#adapters.delete(key);
@@ -163,5 +175,49 @@ export class NetworkManager {
     } catch (error) {
       this.#logger.failure('net', `${adapter.kind} 停止失败`, error);
     }
+  }
+
+  /**
+   * A listener that failed to bind (port taken, interface missing, WS client
+   * dial failure) must not stay dead: retry with capped backoff until it binds
+   * or the connection is disabled/removed. Config edits reset the backoff.
+   */
+  #scheduleRetry(key: string): void {
+    const existing = this.#retries.get(key);
+    if (existing) clearTimeout(existing.timer);
+    const attempts = (existing?.attempts ?? 0) + 1;
+    const delay = Math.min(1000 * 2 ** (attempts - 1), 15_000);
+    const timer = setTimeout(() => {
+      this.#retries.delete(key);
+      if (!this.#started) return;
+      const adapter = this.#adapters.get(key);
+      if (!adapter) return;
+      if (!adapter.config.enabled) return;
+      this.#logger.info('net', `重试启动 ${key}（第 ${attempts} 次）`);
+      void this.#restartAdapter(key);
+    }, delay);
+    timer.unref?.();
+    this.#retries.set(key, { timer, attempts });
+  }
+
+  async #restartAdapter(key: string): Promise<void> {
+    const adapter = this.#adapters.get(key);
+    if (!adapter) return;
+    const kind = adapter.kind;
+    const config = adapter.config;
+    this.#adapters.delete(key);
+    try {
+      await adapter.stop();
+    } catch {
+      // A failed start usually leaves nothing to stop.
+    }
+    await this.#spawn(kind, config);
+  }
+
+  #clearRetry(key: string): void {
+    const entry = this.#retries.get(key);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.#retries.delete(key);
   }
 }

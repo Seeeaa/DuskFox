@@ -37,7 +37,9 @@ test('插件加载、事件钩子与动作调用', async () => {
     const logFile = instance.root + '/data/plugins/demo/events.log';
     await waitFor(() => fs.existsSync(logFile), 5000);
     const lines = fs.readFileSync(logFile, 'utf8').trim().split('\n');
-    assert.equal(lines.some((line) => line.includes('message.private')), true);
+    // Self messages are published as message_sent now; the plugin hooks the
+    // same stream bots see, so it must observe that post type.
+    assert.equal(lines.some((line) => line.includes('message_sent')), true);
 
     const pluginContext = (globalThis as Record<string, unknown>).__duskfoxDemoPlugin as {
       call: (action: string, params?: Record<string, unknown>) => Promise<{ status: string }>;

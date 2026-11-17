@@ -369,19 +369,40 @@ export class ConfigStore {
     };
   }
 
-  /** Overwrite every section from an imported snapshot. */
+  /**
+   * Overwrite sections from an imported snapshot, atomically.
+   *
+   * Every section is validated in memory first; files are written before any
+   * in-memory state changes, so a bad import can never leave half the instance
+   * on new settings and half on old ones (regression test covers this).
+   */
   importAll(data: unknown): ConfigChange[] {
     if (typeof data !== 'object' || data === null) throw new ConfigError('导入内容必须是对象');
     const record = data as Record<string, unknown>;
+
+    const nextOnebot = record.onebot !== undefined ? normalise(OnebotConfigSchema, record.onebot) : this.#onebot;
+    const nextNetwork = record.network !== undefined ? normalise(NetworkConfigSchema, record.network) : this.#network;
+    const nextWebui =
+      record.webui !== undefined
+        ? normalise(WebuiConfigSchema, { ...this.#webui, ...(record.webui as object) })
+        : this.#webui;
+    for (const kind of NETWORK_KINDS) assignIds(nextNetwork[kind] as { id: string }[], kind);
+
     const changes: ConfigChange[] = [];
-    if (record.onebot !== undefined) changes.push(this.saveOnebot(record.onebot));
-    if (record.network !== undefined) changes.push(this.saveNetwork(record.network));
-    if (record.webui !== undefined) {
-      const merged = normalise(WebuiConfigSchema, { ...this.#webui, ...(record.webui as object) });
-      this.#webui = merged;
-      this.save('webui');
-      changes.push({ section: 'webui', changedConnections: [], fullReload: true });
-    }
+    const write = (section: ConfigSection, value: unknown): void => {
+      writeJsonAtomic(this.fileOf(section), value);
+      changes.push({ section, changedConnections: [], fullReload: true });
+    };
+    if (record.onebot !== undefined) write('onebot', nextOnebot);
+    if (record.network !== undefined) write('network', nextNetwork);
+    if (record.webui !== undefined) write('webui', nextWebui);
+
+    // Only now is the in-memory state allowed to move.
+    if (record.onebot !== undefined) this.#onebot = nextOnebot;
+    if (record.network !== undefined) this.#network = nextNetwork;
+    if (record.webui !== undefined) this.#webui = nextWebui;
+    for (const change of changes) this.#announce(change);
+    this.#logger.info('config', `配置已导入：${changes.map((change) => change.section).join(', ') || '无变化'}`);
     return changes;
   }
 

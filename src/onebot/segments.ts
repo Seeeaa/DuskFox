@@ -84,8 +84,13 @@ export function toOb11Segment(segment: Segment): Ob11Segment {
       return { type: 'markdown', data: { content: segment.content } };
     case 'forward':
       return { type: 'forward', data: { id: segment.id } };
-    default:
-      return { type: 'text', data: { text: '' } };
+    default: {
+      // Never silently drop a segment: keep the original type and payload so a
+      // bot can at least see that something unsupported arrived.
+      const kind = segment.type === 'unknown' ? segment.kind : 'unknown';
+      const raw = segment.type === 'unknown' ? segment.raw : undefined;
+      return { type: kind, data: raw && typeof raw === 'object' ? { ...(raw as Record<string, unknown>) } : {} };
+    }
   }
 }
 

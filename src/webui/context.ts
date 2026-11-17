@@ -6,7 +6,7 @@ import type { AccountStatus } from '../core/model.ts';
 import type { ConnectionInfo } from '../onebot/network/base.ts';
 import type { LoadedPlugin } from '../plugins/loader.ts';
 import type { OneBotService } from '../onebot/service.ts';
-import type { Sessions } from './auth.ts';
+import type { Sessions, Tickets } from './auth.ts';
 import type { StreamHub } from './stream.ts';
 
 export type CapabilityState = 'yes' | 'partial' | 'no';
@@ -107,6 +107,7 @@ export interface WebuiContext {
   readonly driver: AccountDriver;
   readonly service: OneBotService;
   readonly sessions: Sessions;
+  readonly tickets: Tickets;
   readonly stream: StreamHub;
 
   status(): Promise<StatusPayload>;

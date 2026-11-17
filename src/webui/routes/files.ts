@@ -14,6 +14,17 @@ interface Entry {
   readonly mtime: number;
 }
 
+/** Files that hold credentials and must never be rendered in the browser. */
+export function isSensitive(relativePath: string): boolean {
+  const value = relativePath.replace(/^\/+/, '');
+  return (
+    value === 'config/webui.json' ||
+    /(^|\/)admin\.token$/.test(value) ||
+    /(^|\/)\.env$/.test(value) ||
+    /(^|\/)onebot\.token$/.test(value)
+  );
+}
+
 /** Read-only browser for the instance work directory. */
 export function registerFileRoutes(router: Router, context: WebuiContext): void {
   router.get('/api/files', async ({ res, url }) => {
@@ -56,6 +67,10 @@ export function registerFileRoutes(router: Router, context: WebuiContext): void 
     if (!requested) throw new HttpError(400, '缺少 path 参数');
     const absolute = resolveWithin(context.paths.root, requested);
     if (!absolute) throw new HttpError(400, '路径越界');
+    // The console token lives in config/webui.json; previewing it would leak
+    // the credential into the browser and every proxy log on the way.
+    const relative = path.relative(context.paths.root, absolute).split(path.sep).join('/');
+    if (isSensitive(relative)) throw new HttpError(403, '该文件包含凭据，禁止在线预览');
     if (!fs.existsSync(absolute)) throw new HttpError(404, '文件不存在');
     const stat = fs.statSync(absolute);
     if (!stat.isFile()) throw new HttpError(400, '不是文件');

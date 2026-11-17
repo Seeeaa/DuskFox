@@ -124,6 +124,8 @@ export interface AccountDriver {
   refreshQr(): Promise<QrPayload>;
 
   sendMessage(message: OutboundMessage): Promise<SendResult>;
+  /** Look a message up by its native id (used by `get_msg` when the window missed it). */
+  fetchMessage?(nativeId: string): Promise<InboundMessage | null>;
   recall(messageId: string): Promise<void>;
   friendList(): Promise<Friend[]>;
   groupList(): Promise<Group[]>;
