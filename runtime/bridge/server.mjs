@@ -144,6 +144,28 @@ export function createBridgeServer(options) {
       if (ring.length > RING) ring.shift();
       return;
     }
+    if (native.type === 'request') {
+      const request = native.request;
+      cursor += 1;
+      ring.push({
+        cursor,
+        data: {
+          time: request.time,
+          self_id: Number(kernel.uin),
+          post_type: 'request',
+          request_type: request.kind,
+          ...(request.kind === 'group' ? { sub_type: (request.detail && request.detail.sub_type) || 'add' } : {}),
+          comment: request.comment,
+          flag: request.flag,
+          ...(request.kind === 'group'
+            ? { group_id: Number(request.peer.id) || 0, user_id: Number(request.user.id) || 0 }
+            : { user_id: Number(request.user.id) || 0 }),
+        },
+      });
+      if (ring.length > RING) ring.shift();
+      return;
+    }
+
     if (native.type === 'notice') {
       cursor += 1;
       ring.push({ cursor, data: { time: Math.floor(Date.now() / 1000), self_id: Number(kernel.uin), ...native.notice } });

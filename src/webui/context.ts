@@ -41,7 +41,12 @@ export interface StatusPayload {
   };
   readonly account: AccountStatus;
   /** Which login methods the current driver actually supports. */
-  readonly login: { readonly qr: boolean; readonly quick: boolean; readonly password: boolean };
+  readonly login: {
+    readonly qr: boolean;
+    readonly quick: boolean;
+    readonly password: boolean;
+    readonly logout: boolean;
+  };
   readonly stats: {
     readonly rx: number;
     readonly tx: number;

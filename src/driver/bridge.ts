@@ -26,6 +26,8 @@ interface BridgeStatusPayload {
   readonly login_mode?: 'active' | 'passive';
   /** Contract version of the runtime (1 = legacy send-private only). */
   readonly contract?: number;
+  /** "sim" for the simulated kernel; absent for a real runtime. */
+  readonly mode?: string;
   /** Identity of the runtime process instance; changes across restarts. */
   readonly instance?: string;
   /** Which OneBot segments the runtime can actually send / receive. */
@@ -105,6 +107,8 @@ export class BridgeDriver implements AccountDriver {
   #loginMode: 'active' | 'passive' | 'unknown' = 'unknown';
   /** Native phase reported by the runtime (waiting_login, scan_qr, ...). */
   #phase = '';
+  /** True when the runtime reports itself as a simulated kernel. */
+  #simulated = false;
   /** Contract version and instance id reported by the runtime. */
   #contract = 1;
   #instance = '';
@@ -172,7 +176,9 @@ export class BridgeDriver implements AccountDriver {
 
   async qrCode(): Promise<QrPayload> {
     if (!this.#status.online) await this.#fetchQr();
-    return this.#composeQr();
+    const payload = this.#composeQr();
+    // A simulated runtime hands out placeholder bytes, not a scannable code.
+    return this.#simulated ? { ...payload, mock: true } : payload;
   }
 
   /**
@@ -351,6 +357,7 @@ export class BridgeDriver implements AccountDriver {
       const payload = await this.#request<BridgeStatusPayload>('/api/status');
       this.#applyLoginMode(payload?.login_mode);
       if (payload?.phase) this.#phase = payload.phase;
+      if (typeof payload?.mode === 'string') this.#simulated = payload.mode === 'sim';
       this.#applyFeatures(payload);
       if (Array.isArray(payload?.pending_native) && !this.#pendingReported && payload.pending_native.length > 0) {
         this.#pendingReported = true;
@@ -372,6 +379,7 @@ export class BridgeDriver implements AccountDriver {
       };
       this.#lastError = '';
       this.#setStatus(next);
+      if (online) this.#qr = { state: 'none', seq: this.#qr.seq };
       if (!online && payload?.qr_ready && !this.#qr.image) await this.#fetchQr();
       this.#publishQr();
     } catch (error) {
@@ -618,7 +626,9 @@ export class BridgeDriver implements AccountDriver {
     expires_at?: number;
     seq?: number;
     available?: boolean;
+    mode?: string;
   } | null): QrPayload {
+    if (payload && typeof payload.mode === 'string') this.#simulated = payload.mode === 'sim';
     const picture = payload?.picture ?? payload?.image;
     if (!payload || payload.available === false || !picture) {
       return { state: this.#status.online ? 'none' : 'expired', seq: this.#qr.seq };
@@ -647,6 +657,10 @@ export class BridgeDriver implements AccountDriver {
    */
   #composeQr(): QrPayload {
     const seq = this.#qr.seq;
+    // Logged in: a previously cached picture is stale, never show it again.
+    if (this.#status.online) {
+      return { state: 'none', seq, refreshable: this.#qrRefreshable, loginMode: this.#loginMode };
+    }
     // The runtime phase is authoritative: a cached picture must not hide
     // "already scanned" / "authenticated" / "failed" transitions.
     if (this.#phase === 'confirm_on_phone') {

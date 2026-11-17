@@ -224,6 +224,8 @@ export interface QrPayload {
   readonly loginMode?: 'active' | 'passive' | 'unknown';
   /** Why no scannable code is available, shown verbatim by the console. */
   readonly hint?: string;
+  /** True when the code came from a simulated kernel and is not scannable. */
+  readonly mock?: boolean;
 }
 
 /** Everything a driver may do. Optional methods map 1:1 to OneBot actions. */

@@ -750,7 +750,12 @@ setInterval(function(){
 },Math.max(2,+(SET.refresh||5))*1000);
 /* ====== 公共片段 ====== */
 /* ====== 公共片段 ====== */
-var SRC=function(a,label){a=a||{};var w=a.wired!==false;return '<span class="src">'+(w?'已接 · ':'待接入 · ')+(a.m||'')+' '+(a.p||'')+(label?' · '+label:'')+'</span>'};
+var SRC=function(a,label){
+ a=a||{};
+ var w=a.wired!==false;
+ if(S.endpoints&&a.p){var hit=S.endpoints.filter(function(e){return e.path===a.p&&(!a.m||e.method===a.m)})[0];if(hit)w=hit.wired!==false}
+ return '<span class="src">'+(w?'已接 · ':'待接入 · ')+(a.m||'')+' '+(a.p||'')+(label?' · '+label:'')+'</span>';
+};
 function tag(k){return {y:'<span class="tg a">已支持</span>',p:'<span class="tg p">部分支持</span>',n:'<span class="tg n">暂不支持</span>'}[k]||''}
 function gate(fn,empty){var d=S.demo;
  if(d==='loading')return '<div class="sk" style="width:60%"></div><div class="sk"></div><div class="sk" style="width:80%"></div><div class="sk" style="width:40%"></div>';
@@ -861,7 +866,7 @@ P.account={n:'账号',r:function(){
   }
   return '<div class="who"><img class="av" alt="" src="'+a.avatar+'"><div><div class="wn">'+E(a.nick)+'</div><div class="wq mono">'+a.uin+'</div></div></div>'+
    '<dl class="kv"><dt>状态</dt><dd><span class="tg a">在线</span></dd><dt>QQ 号</dt><dd class="mono">'+a.uin+'</dd><dt>昵称</dt><dd>'+E(a.nick)+'</dd><dt>登录方式</dt><dd>'+E(a.via)+'</dd><dt>驱动</dt><dd>'+E(drv.name||'—')+'</dd></dl>'+
-   '<div class="row" style="margin-top:20px"><button class="btn g s" data-act="logout">退出登录</button></div>';
+   (S.login&&S.login.logout?'<div class="row" style="margin-top:20px"><button class="btn g s" data-act="logout">退出登录</button></div>':'<div class="note" style="margin-top:20px">当前运行时未提供退出登录接口。</div>');
  })+'</div>'+
  '<div class="sec"><h2>登录 '+(drv.id==='mock'?'<span class="src">模拟驱动 · 二维码不可扫描</span>':SRC(API.qr))+'</h2><div class="tabs" data-tabs="lg"><button class="on" data-t="qr">扫码登录</button><button data-t="quick">快速登录</button><button data-t="pw">账号密码</button></div><div id="lgbody"></div></div>'+
  '<div class="sec"><h2>QQ 进程 '+(S.procAvail?SRC(API.process):'<span class="src">待接入 · 当前驱动不提供进程信息</span>')+'</h2>'+gate(function(){
