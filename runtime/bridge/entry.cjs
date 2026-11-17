@@ -19,6 +19,51 @@ if (!fs.existsSync(tokenFile)) {
 }
 const token = process.env.QQ_BRIDGE_TOKEN || fs.readFileSync(tokenFile, 'utf8').trim();
 
+// Capture the session created by the official launcher. On this QQ build the
+// static getNTWrapperSession lookup can return no session even while QQ is
+// logged in; the existing lab bridge verified this capture point in practice.
+let capturedSession = null;
+let wrapperObserved = false;
+const originalDlopen = process.dlopen;
+process.dlopen = function (...args) {
+  const result = Reflect.apply(originalDlopen, this, args);
+  const [loadedModule, filename] = args;
+  if (path.basename(String(filename)) !== 'wrapper.node' || wrapperObserved) return result;
+  wrapperObserved = true;
+  const nativeExports = loadedModule.exports;
+  const nativeSessionType = nativeExports.NodeIQQNTWrapperSession;
+  if (nativeSessionType) {
+    const sessionFacade = new Proxy(function () {}.bind(null), {
+      get(_target, key) {
+        const member = Reflect.get(nativeSessionType, key, nativeSessionType);
+        if (typeof member !== 'function' || (key !== 'create' && key !== 'getNTWrapperSession')) return member;
+        return (...callArgs) => {
+          const session = Reflect.apply(member, nativeSessionType, callArgs);
+          if (session && typeof session.getMsgService === 'function') capturedSession = session;
+          return session;
+        };
+      },
+      has(_target, key) { return Reflect.has(nativeSessionType, key); },
+      getPrototypeOf() { return Reflect.getPrototypeOf(nativeSessionType); },
+      construct(_target, callArgs) { return Reflect.construct(nativeSessionType, callArgs); },
+    });
+    loadedModule.exports = new Proxy({}, {
+      get(_target, key) {
+        return key === 'NodeIQQNTWrapperSession' ? sessionFacade
+          : Reflect.get(nativeExports, key, nativeExports);
+      },
+      has(_target, key) { return Reflect.has(nativeExports, key); },
+      ownKeys() { return Reflect.ownKeys(nativeExports); },
+      getOwnPropertyDescriptor(_target, key) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(nativeExports, key);
+        return descriptor ? { ...descriptor, configurable: true } : undefined;
+      },
+    });
+  }
+  process.dlopen = originalDlopen;
+  return result;
+};
+
 (async () => {
   try {
     // 先装载官方 launcher（旧桥接同样的做法），失败不阻断桥接本身。
@@ -30,7 +75,10 @@ const token = process.env.QQ_BRIDGE_TOKEN || fs.readFileSync(tokenFile, 'utf8').
   const { NativeKernel } = require('./native-kernel.cjs');
   const { createBridgeServer, attachKernelEvents } = await import('./server.mjs');
 
-  const kernel = new NativeKernel();
+  const kernel = new NativeKernel({
+    wrapperObserved: () => wrapperObserved,
+    sessionProvider: () => capturedSession,
+  });
   const bridge = createBridgeServer({
     kernel,
     token,
