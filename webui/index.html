@@ -666,7 +666,7 @@ function loginLabel(a){
   if(a.loginType==='quick')return '快速登录';
   if(a.loginType==='password')return '密码登录';
   if(a.loginType==='session')return '已有会话';
-  return a.online?'在线':'未登录';
+  return a.online?'在线':a.state==='logging'?'已授权':'未登录';
 }
 function applyStatus(d){
   if(!d)return;
@@ -813,7 +813,7 @@ function paintQr(){
   img.src=q.image;img.style.display='block';if(box)box.classList.remove('ex');
  }else{
   img.removeAttribute('src');img.style.display='none';
-  if(box)box.classList.toggle('ex',q.state==='expired'||q.state==='scanned'||q.state==='confirmed');
+  if(box)box.classList.toggle('ex',q.state==='expired'||q.state==='scanned'||q.state==='confirmed'||(q.state==='none'&&!q.image));
  }
  if(hint)hint.innerHTML=qrHintText(q);
  if(btn){
@@ -862,7 +862,8 @@ P.account={n:'账号',r:function(){
  return head(2,'账号','登录状态、扫码登录，以及 QQ 进程的运行情况。')+
  '<div class="sec"><h2>当前账号 '+SRC(API.status)+'</h2>'+gate(function(){
   if(!a.online){
-   return '<div class="state"><b>账号未登录</b>'+E(a.detail||'请在下方选择登录方式。')+'<br><button class="btn g s" data-act="refresh">刷新状态</button></div>';
+   var authed=a.state==='logging';
+   return '<div class="state"><b>'+(authed?'已授权':'账号未登录')+'</b>'+(authed&&a.uin?' · '+E(a.uin):'')+'<br>'+E(a.detail||'请在下方选择登录方式。')+'<br><button class="btn g s" data-act="refresh">刷新状态</button></div>';
   }
   return '<div class="who"><img class="av" alt="" src="'+a.avatar+'"><div><div class="wn">'+E(a.nick)+'</div><div class="wq mono">'+a.uin+'</div></div></div>'+
    '<dl class="kv"><dt>状态</dt><dd><span class="tg a">在线</span></dd><dt>QQ 号</dt><dd class="mono">'+a.uin+'</dd><dt>昵称</dt><dd>'+E(a.nick)+'</dd><dt>登录方式</dt><dd>'+E(a.via)+'</dd><dt>驱动</dt><dd>'+E(drv.name||'—')+'</dd></dl>'+
@@ -1157,7 +1158,7 @@ P.overview={n:'概览',r:function(){
  var a=S.acct,drv=(S.app&&S.app.driver)||{};
  return head(1,'概览','实例运行状况与当前可用的能力范围。')+
  '<div class="sec"><h2>运行状态 '+SRC(API.status)+'</h2>'+gate(function(){
-  return '<div class="hero"><div><div class="st-big">'+(a.online?'已连接':'未登录')+'</div>'+
+  return '<div class="hero"><div><div class="st-big">'+(a.online?'已连接':a.state==='logging'?'已授权':'未登录')+'</div>'+
    '<div class="lab">'+(a.online?('账号 '+a.uin+' · '+E(a.nick)+' · 运行 <span id="up">'+uptime()+'</span>'):('等待账号登录 · 驱动 '+E(drv.name||'—')))+'</div></div></div>'+
    '<div class="sig"><div class="sh"><span class="sgs"><button data-sg="vals" class="on">全部</button><button data-sg="rx">收</button><button data-sg="tx">发</button></span><span class="src">近 <b id="sgn"></b> 秒 · 每秒统计来自 GET /api/status</span></div><div class="sgw"><canvas class="wv big" data-rows="7" data-series="vals" aria-hidden="true"></canvas><div class="sgt" id="sgt"></div></div></div></div>'+
    '<div class="grid tiles">'+[['rx','收到消息',S.stat.rx],['tx','发出消息',S.stat.tx],['','活动连接',S.stat.conn],['','事件 / 分钟',S.stat.epm]].map(function(x){return '<div class="tile"><div class="lab">'+x[1]+'</div><div class="num"'+(x[0]?' data-c="'+x[0]+'"':'')+'>'+x[2]+'</div></div>'}).join('')+'</div>';
