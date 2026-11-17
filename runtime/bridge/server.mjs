@@ -129,6 +129,8 @@ export function createBridgeServer(options) {
   function computePhase() {
     const status = kernel.status();
     if (status.online) return 'online';
+    // Authorised but the message network is not up yet: never fall back to QR.
+    if (status.authorized) return 'authenticated';
     if (kernel.qrState === 'scanned') return 'confirm_on_phone';
     if (kernel.qrState === 'waiting') return 'scan_qr';
     if (kernel.qrState === 'confirmed') return 'authenticated';
@@ -203,6 +205,9 @@ export function createBridgeServer(options) {
   async function pumpQr() {
     if (halted) return;
     if (kernel.status().online) return;
+    // Once the account is authorised there is nothing to scan; requesting more
+    // codes only makes the console bounce back to the QR screen.
+    if (kernel.status().authorized) return;
     if (kernel.currentQr() && !kernel.currentQr().expired) return;
     if (!pumpEnabled) return;
     if (qrInFlight) return;
@@ -236,7 +241,9 @@ export function createBridgeServer(options) {
       const status = kernel.status();
       return send(200, {
         message_ready: status.online,
-        self_id: status.online ? Number(kernel.uin) : 0,
+        authorized: Boolean(status.authorized),
+        msf_status: Number(status.msf ?? 0),
+        self_id: status.authorized || status.online ? Number(kernel.uin) : 0,
         nickname: status.nick,
         avatar: status.avatar,
         version: kernel.version,
@@ -257,6 +264,17 @@ export function createBridgeServer(options) {
     }
 
     if (url.pathname === '/api/qr' && request.method === 'GET') {
+      const live = kernel.status();
+      if (live.authorized && !live.online) {
+        return send(200, {
+          state: 'none',
+          seq: kernel.qrSeq ?? 0,
+          refreshable: false,
+          loginMode: pumpEnabled ? 'active' : 'passive',
+          hint: '已授权，等待消息网络连接（MSF=' + Number(live.msf ?? 0) + '）；无需再次扫码',
+          phase: 'authenticated',
+        });
+      }
       const payload = currentQrPayload();
       if (!payload.picture) {
         const hint = payload.state === 'scanned' ? payload.hint : payload.hint ?? '暂无二维码，运行时会在后台请求';
@@ -283,6 +301,7 @@ export function createBridgeServer(options) {
     }
 
     if (url.pathname === '/api/qr/refresh' && request.method === 'POST') {
+      if (kernel.status().authorized) return send(409, { error: '账号已授权，无需刷新二维码；等待消息网络连接' });
       if (!pumpEnabled) return send(409, { error: '被动模式：请在 QQ 窗口刷新二维码' });
       try {
         const accepted = await kernel.requestQr();
