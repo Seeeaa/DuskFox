@@ -31,6 +31,8 @@ interface BridgeStatusPayload {
   /** Which OneBot segments the runtime can actually send / receive. */
   readonly send_segments?: string[];
   readonly recv_segments?: string[];
+  /** Native calls the runtime author has not verified against a real client. */
+  readonly pending_native?: string[];
   /**
    * Optional capability report. Runtimes that implement contract v2 send it;
    * older ones omit it and keep the conservative v1 capability set.
@@ -106,6 +108,7 @@ export class BridgeDriver implements AccountDriver {
   /** Contract version and instance id reported by the runtime. */
   #contract = 1;
   #instance = '';
+  #pendingReported = false;
   #qrRefreshable = true;
   /** When the current QR image was first observed, used to derive expiry. */
   #qrSeenAt = 0;
@@ -336,6 +339,13 @@ export class BridgeDriver implements AccountDriver {
       this.#applyLoginMode(payload?.login_mode);
       if (payload?.phase) this.#phase = payload.phase;
       this.#applyFeatures(payload);
+      if (Array.isArray(payload?.pending_native) && !this.#pendingReported && payload.pending_native.length > 0) {
+        this.#pendingReported = true;
+        this.#context.logger.warn(
+          'driver:bridge',
+          `运行时报告 ${payload.pending_native.length} 项待实机验证的原生调用：${payload.pending_native.join('；')}`,
+        );
+      }
       const online = Boolean(payload?.message_ready && payload?.self_id);
       const uin = payload?.self_id ? String(payload.self_id) : '';
       const next: AccountStatus = {

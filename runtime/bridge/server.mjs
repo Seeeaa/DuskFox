@@ -224,6 +224,9 @@ export function createBridgeServer(options) {
         send_segments: sendSegments,
         recv_segments: recvSegments,
         features,
+        ...(Array.isArray(kernel.pendingNative) && kernel.pendingNative.length > 0
+          ? { pending_native: kernel.pendingNative }
+          : {}),
       });
     }
 
