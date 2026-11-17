@@ -210,3 +210,24 @@ test('get_msg：本地窗口淘汰后回退到运行时原生查询', async () =
     await runtime.close();
   }
 });
+
+test('密码登录：控制台 -> 运行时（能力由 features 决定，错误密码失败）', async () => {
+  const runtime = await bootRuntime({ autoLogin: false });
+  const instance = await startInstance({ driver: 'bridge', driverOptions: { endpoint: runtime.base, token: 'runtime-token' } });
+  try {
+    await waitFor(async () => (await instance.call('GET', '/api/status')).json.login.password === true, 8000);
+    const wrong = await instance.call('POST', '/api/account/login', { method: 'password', uin: '10001', password: 'wrong' });
+    assert.equal(wrong.status, 502);
+    assert.match(String(wrong.json.error), /密码/);
+
+    const badUin = await instance.call('POST', '/api/account/login', { method: 'password', uin: 'abc', password: 'x' });
+    assert.equal(badUin.status, 400);
+
+    const good = await instance.call('POST', '/api/account/login', { method: 'password', uin: '10001', password: 'sim-password' });
+    assert.equal(good.status, 200);
+    await waitFor(async () => (await instance.call('GET', '/api/status')).json.account.online === true, 8000);
+  } finally {
+    await instance.stop();
+    await runtime.close();
+  }
+});

@@ -148,8 +148,21 @@ export class BridgeDriver implements AccountDriver {
   }
 
   async login(request: LoginRequest): Promise<void> {
-    if (request.method !== 'qr') throw new Error('桥接驱动仅支持扫码登录');
-    await this.refreshQr();
+    if (request.method === 'qr') {
+      await this.refreshQr();
+      return;
+    }
+    if (request.method === 'password') {
+      if (!this.capabilities.passwordLogin) throw new Error('当前运行时未启用密码登录');
+      const uin = String(request.uin ?? '').trim();
+      const password = String(request.password ?? '');
+      if (!/^\d{5,12}$/.test(uin)) throw new Error('QQ 号格式不正确');
+      if (!password) throw new Error('密码不能为空');
+      // The runtime md5s the password in memory; it is never persisted or logged.
+      await this.#request('/api/login', 'POST', { method: 'password', uin, password });
+      return;
+    }
+    throw new Error('桥接驱动仅支持扫码或密码登录');
   }
 
   async logout(): Promise<void> {
@@ -726,7 +739,18 @@ export class BridgeDriver implements AccountDriver {
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(`桥接服务不可达：${this.#endpoint}（${reason}）`);
     }
-    if (!response.ok) throw new Error(`桥接服务返回 HTTP ${response.status}`);
+    if (!response.ok) {
+      // Surface the runtime's own message (e.g. "密码错误") instead of a bare
+      // status code; operators need the real reason.
+      let detail = '';
+      try {
+        const body = (await response.json()) as { error?: unknown };
+        if (body && typeof body.error === 'string' && body.error) detail = '：' + body.error;
+      } catch {
+        // Non-JSON error bodies keep the generic message.
+      }
+      throw new Error(`桥接服务返回 HTTP ${response.status}${detail}`);
+    }
     return (await response.json()) as T;
   }
 

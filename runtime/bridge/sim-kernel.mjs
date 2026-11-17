@@ -53,6 +53,9 @@ export class SimKernel {
   constructor(options = {}) {
     this.mode = 'sim';
     this.version = 'sim-kernel-1.0';
+    this.sendSegments = ['text', 'image'];
+    this.recvSegments = ['text', 'image', 'face', 'at', 'reply'];
+    this.passwordLoginEnabled = true;
     this.uin = '10001';
     this.nick = '模拟测试号';
     this.avatar = svgAvatar('DQ');
@@ -101,6 +104,21 @@ export class SimKernel {
 
   async requestQr() {
     return this.issueQr();
+  }
+
+  /**
+   * Simulated password login: only the fixed test password works, mirroring
+   * the "wrong password must fail" behaviour of the real client.
+   */
+  async login({ method, uin, password }) {
+    if (method !== 'password') throw new Error('模拟内核仅支持密码登录');
+    if (String(uin) !== this.uin) throw new Error('模拟内核只接受测试号 ' + this.uin);
+    if (password !== 'sim-password') throw new Error('密码错误（模拟内核）');
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    this.qr = null;
+    this.qrState = 'confirmed';
+    this.online = true;
+    return { accepted: true };
   }
 
   scanQr() {

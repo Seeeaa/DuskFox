@@ -152,6 +152,11 @@ export class Application implements WebuiContext {
       },
       account,
       stats: snapshot,
+      login: {
+        qr: this.driver.capabilities.qrLogin,
+        quick: this.driver.capabilities.quickLogin,
+        password: this.driver.capabilities.passwordLogin,
+      },
       onebot: {
         selfId: this.service.selfId,
         online: this.service.online,
