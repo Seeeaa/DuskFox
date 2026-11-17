@@ -275,7 +275,7 @@ export default function setup(ctx) {
 ```bash
 npm run typecheck   # 严格模式 TypeScript 检查（含测试）
 npm run build       # 输出到 dist/
-npm test            # node:test：31 个用例（配置/协议/传输/驱动/插件/控制台）
+npm test            # node:test：34 个用例（配置/协议/传输/驱动/插件/控制台/二维码）
 ```
 
 测试覆盖：配置规范化与拒绝非法值、CQ 码往返、消息 ID 映射与淘汰、控制台鉴权与接口、
