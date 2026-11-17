@@ -713,10 +713,13 @@ function pushLg(r){
 
 /* ---- SSE ---- */
 var ES=null,esTimer=null,esDelay=1000,esActive=false;
-function connectStream(){
+async function connectStream(){
   if(ES){try{ES.close()}catch(e){}ES=null}
   if(!window.EventSource)return;
-  try{ES=new EventSource('/api/stream?token='+encodeURIComponent(tok()))}catch(e){return}
+  var ticket='';
+  try{var tk=await api('POST','/api/tickets',{purpose:'stream'});ticket=tk.ticket||''}catch(e){return}
+  if(!ticket)return;
+  try{ES=new EventSource('/api/stream?ticket='+encodeURIComponent(ticket))}catch(e){return}
   ES.addEventListener('log',function(ev){try{pushLg(JSON.parse(ev.data))}catch(e){}});
   ES.addEventListener('event',function(ev){try{pushEv(JSON.parse(ev.data))}catch(e){}});
   ES.addEventListener('status',function(ev){try{var st=JSON.parse(ev.data);if(st&&cur==='account')updateAccountLive(st)}catch(e){}});
@@ -1025,7 +1028,7 @@ P.logs={n:'日志',r:function(){return head(6,'日志','实例运行日志，实
  return '<div class="row" style="margin-bottom:14px"><div class="seg" id="lv">'+['全部','DEBUG','INFO','WARN','ERROR'].map(function(l,i){return '<button class="'+(i?'':'on')+'" data-l="'+l+'">'+l+'</button>'}).join('')+'</div>'+
   '<label style="flex:1;min-width:140px"><input id="lq" placeholder="搜索…" style="width:100%;padding:6px 0;border-bottom:1px solid var(--ink)"></label>'+
   '<button class="btn g s" id="lp">暂停</button><button class="btn g s" id="lc">清空</button>'+
-  '<a class="btn g s" data-act="logdl" href="/api/logs/download?token='+encodeURIComponent(tok())+'" download>下载</a></div><div class="log" id="lb"></div>';
+  '<button class="btn g s" data-act="logdl">下载</button></div><div class="log" id="lb"></div>';
 },'暂无日志')+'</div>'},
  i:function(){
   var lb=$('#lb');if(!lb)return;
@@ -1102,7 +1105,7 @@ var SP={appearance:function(){return '<div class="list">'+row('主题','浅色�
    '<div class="row" style="margin-top:14px"><span class="muted" style="font-size:13px">软配额 '+fmtSize(st.quota)+'，仅用于展示占用比例</span></div>'+
    '<div class="row" style="margin-top:20px"><button class="btn g s" data-act="clean" data-v="logs">清理日志</button><button class="btn g s" data-act="clean" data-v="cache">清理缓存</button></div>'},
  data:function(){return '<div class="list">'+
-   row('导出配置','下载 OneBot 与网络配置（不含控制台令牌）','<a class="btn g s" href="/api/config/export?token='+encodeURIComponent(tok())+'" download>导出</a>')+
+   row('导出配置','下载 OneBot 与网络配置（不含控制台令牌）','<button class="btn g s" data-act="exportcfg">导出</button>')+
    row('导入配置','用 JSON 覆盖 OneBot 与网络配置','<button class="btn g s" data-act="importcfg">导入</button>')+
    row('恢复默认','重置 OneBot 与网络配置','<button class="btn g s" data-act="resetcfg">恢复</button>')+'</div>'}
 };
@@ -1367,6 +1370,18 @@ async function handleAct(a,e){
   var f=$('#ntk');if(!f)return;
   var nv=f.value.trim();
   return withBusy(a,'更新中',async function(){var d=await api('PUT','/api/security/token',{token:nv});setTok(d.token);f.value='';toast('令牌已更新','旧令牌立即失效，当前会话继续有效')});
+ }
+ if(act==='logdl'){
+  return withBusy(a,'准备中',async function(){
+   var t=await api('POST','/api/tickets',{purpose:'logs.download'});
+   location.href='/api/logs/download?ticket='+encodeURIComponent(t.ticket);
+  });
+ }
+ if(act==='exportcfg'){
+  return withBusy(a,'准备中',async function(){
+   var t=await api('POST','/api/tickets',{purpose:'config.export'});
+   location.href='/api/config/export?ticket='+encodeURIComponent(t.ticket);
+  });
  }
  if(act==='clean'){
   var tv=a.dataset.v;

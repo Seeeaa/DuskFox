@@ -11,7 +11,7 @@ import { createDriver } from './driver/registry.ts';
 import type { AccountDriver, DriverOptions } from './driver/types.ts';
 import { OneBotService } from './onebot/service.ts';
 import { PluginHost } from './plugins/loader.ts';
-import { Sessions } from './webui/auth.ts';
+import { Sessions, Tickets } from './webui/auth.ts';
 import { StreamHub } from './webui/stream.ts';
 import { ConsoleServer } from './webui/server.ts';
 import type {
@@ -54,6 +54,7 @@ export class Application implements WebuiContext {
   readonly driver: AccountDriver;
   readonly service: OneBotService;
   readonly sessions: Sessions;
+  readonly tickets = new Tickets();
   readonly stream = new StreamHub();
   readonly version = VERSION;
   readonly startedAt = Date.now();
@@ -180,7 +181,13 @@ export class Application implements WebuiContext {
     const caps = this.driver.capabilities;
     const enabled = (kind: keyof typeof this.config.network): boolean =>
       (this.config.network[kind] as Array<{ enabled: boolean }>).some((entry) => entry.enabled);
-    const media = [caps.mediaImage, caps.mediaRecord, caps.mediaVideo, caps.mediaFile].filter(Boolean).length;
+    const mediaKinds = [
+      caps.mediaImage ? '图片' : '',
+      caps.mediaRecord ? '语音' : '',
+      caps.mediaVideo ? '视频' : '',
+      caps.mediaFile ? '文件' : '',
+    ].filter(Boolean);
+    const media = mediaKinds.length;
     const transport = (kind: keyof typeof this.config.network, label: string, detail: string): CapabilityRow => ({
       key: kind,
       label,
@@ -193,7 +200,7 @@ export class Application implements WebuiContext {
       {
         key: 'media',
         label: '媒体消息段',
-        detail: '图片 / 语音 / 视频 / 文件',
+        detail: media > 0 ? `已支持：${mediaKinds.join(' / ')}` : '图片 / 语音 / 视频 / 文件均未支持',
         state: media === 4 ? 'yes' : media > 0 ? 'partial' : 'no',
       },
       transport('http-server', 'HTTP API', 'HTTP 服务端'),

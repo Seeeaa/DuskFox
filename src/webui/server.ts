@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebuiContext } from './context.ts';
 import { createRouter } from './routes/index.ts';
 import { Router, sendJson } from './http.ts';
-import { extractToken, isAdminToken } from './auth.ts';
+import { extractToken, isAdminToken, TICKET_ROUTES } from './auth.ts';
 import { isWithin } from '../core/paths.ts';
 
 const MIME: Record<string, string> = {
@@ -122,10 +122,16 @@ export class ConsoleServer {
   }
 
   #authorised(request: IncomingMessage, url: URL): boolean {
-    const token = extractToken(request.headers, url);
-    if (!token) return false;
-    if (isAdminToken(token, this.#context.config.webui.token)) return true;
-    return this.#context.sessions.touch(token);
+    const token = extractToken(request.headers);
+    if (token) {
+      if (isAdminToken(token, this.#context.config.webui.token)) return true;
+      if (this.#context.sessions.touch(token)) return true;
+    }
+    // Downloads and EventSource cannot send headers; they use a scoped ticket.
+    const ticket = url.searchParams.get('ticket');
+    const scope = TICKET_ROUTES[url.pathname];
+    if (ticket && scope) return this.#context.tickets.redeem(ticket, scope);
+    return false;
   }
 
   #serveStatic(pathname: string, response: ServerResponse, request: IncomingMessage): void {

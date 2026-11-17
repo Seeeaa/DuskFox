@@ -1,7 +1,7 @@
 import type { Router } from '../http.ts';
 import { HttpError, sendJson } from '../http.ts';
 import type { WebuiContext } from '../context.ts';
-import { extractToken, isAdminToken } from '../auth.ts';
+import { extractToken, isAdminToken, TICKET_ROUTES } from '../auth.ts';
 import { LoginGuard } from '../auth.ts';
 
 /** Auth, status, process control, storage and security routes. */
@@ -23,15 +23,27 @@ export function registerSystemRoutes(router: Router, context: WebuiContext, guar
     sendJson(res, 200, { ok: true, token: session.token, expiresAt: session.expiresAt });
   });
 
-  router.get('/api/auth/session', async ({ req, res, url }) => {
-    const token = extractToken(req.headers, url);
+  router.get('/api/auth/session', async ({ req, res }) => {
+    const token = extractToken(req.headers);
     sendJson(res, 200, { ok: true, admin: isAdminToken(token, context.config.webui.token) });
   });
 
-  router.post('/api/auth/logout', async ({ req, res, url }) => {
-    const token = extractToken(req.headers, url);
+  router.post('/api/auth/logout', async ({ req, res }) => {
+    const token = extractToken(req.headers);
     if (!isAdminToken(token, context.config.webui.token)) context.sessions.destroy(token);
     sendJson(res, 200, { ok: true });
+  });
+
+  /**
+   * Issue a short-lived ticket for URLs that cannot carry headers
+   * (downloads, EventSource). The session token never appears in a URL.
+   */
+  router.post('/api/tickets', async ({ res, body }) => {
+    const payload = await body();
+    const purpose = typeof payload.purpose === 'string' ? payload.purpose : '';
+    const scope = Object.values(TICKET_ROUTES).includes(purpose) ? purpose : null;
+    if (!scope) throw new HttpError(400, 'purpose 取值不合法');
+    sendJson(res, 200, context.tickets.issue(scope));
   });
 
   router.get('/api/status', async ({ res }) => {

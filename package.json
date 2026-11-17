@@ -23,7 +23,8 @@
     "start": "node dist/main.js",
     "dev": "node --watch src/main.ts",
     "test": "node --test --test-reporter=spec \"tests/*.test.ts\"",
-    "ui": "node tools/ui-smoke.mjs"
+    "ui": "node tools/ui-smoke.mjs",
+    "acceptance": "node tools/offline-acceptance.mjs"
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.41",

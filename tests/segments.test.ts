@@ -58,3 +58,11 @@ test('未知消息段保留为 unknown 而不是静默丢弃', () => {
   const segments = parseMessage([{ type: 'mface', data: { url: 'x' } }]);
   assert.equal(segments[0]?.type, 'unknown');
 });
+
+test('输出未知消息段时保留原始类型与负载，不变成空文本', () => {
+  const out = formatMessage(
+    [{ type: 'unknown', kind: 'mface', raw: { url: 'x', summary: '[动画表情]' } }],
+    'array',
+  );
+  assert.deepEqual(out, [{ type: 'mface', data: { url: 'x', summary: '[动画表情]' } }]);
+});

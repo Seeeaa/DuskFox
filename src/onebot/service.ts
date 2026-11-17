@@ -318,7 +318,7 @@ export function summarise(event: Ob11EventBase): { type: string; summary: string
     const sender = (event.sender ?? {}) as { nickname?: string; user_id?: number };
     const text = previewText(event.message);
     return {
-      type: `message.${messageType}`,
+      type: post === 'message_sent' ? `message_sent.${messageType}` : `message.${messageType}`,
       summary: `${sender.nickname || id} → ${text}`,
     };
   }

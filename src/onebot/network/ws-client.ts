@@ -14,6 +14,7 @@ export class WsClientAdapter extends NetworkAdapter {
   #detail = '未启动';
   #attempts = 0;
   #backlog: Ob11EventBase[] = [];
+  #dropped = 0;
   #closed = false;
 
   constructor(config: WsClientConnection, host: ConstructorParameters<typeof NetworkAdapter>[2]) {
@@ -49,7 +50,16 @@ export class WsClientAdapter extends NetworkAdapter {
     const socket = this.#socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       this.#backlog.push(event);
-      if (this.#backlog.length > MAX_BACKLOG) this.#backlog.shift();
+      if (this.#backlog.length > MAX_BACKLOG) {
+        this.#backlog.shift();
+        this.#dropped += 1;
+        if (this.#dropped % 20 === 1) {
+          this.host.logger.warn(
+            'net:ws-client',
+            `${(this.config as WsClientConnection).name || this.config.id} 未连接，事件积压超过 ${MAX_BACKLOG} 条，已丢弃 ${this.#dropped} 条`,
+          );
+        }
+      }
       return;
     }
     socket.send(JSON.stringify(event));

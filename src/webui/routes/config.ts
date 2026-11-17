@@ -1,6 +1,15 @@
 import type { Router } from '../http.ts';
 import { HttpError, sendAttachment, sendJson } from '../http.ts';
 import type { WebuiContext } from '../context.ts';
+import { ConfigError } from '../../core/config.ts';
+
+/** Map config validation failures to 400 with the field paths attached. */
+function asHttpError(error: unknown): never {
+  if (error instanceof ConfigError) {
+    throw new HttpError(400, [error.message, ...error.issues].filter(Boolean).join('；'));
+  }
+  throw error;
+}
 
 /** Configuration read/write/export/import/reset. */
 export function registerConfigRoutes(router: Router, context: WebuiContext): void {
@@ -27,17 +36,21 @@ export function registerConfigRoutes(router: Router, context: WebuiContext): voi
   router.put('/api/config', async ({ res, body }) => {
     const payload = await body();
     const changes: string[] = [];
-    if (payload.onebot !== undefined) {
-      if (typeof payload.onebot !== 'object' || payload.onebot === null) throw new HttpError(400, 'onebot 必须是对象');
-      const change = context.config.saveOnebot(payload.onebot);
-      changes.push(`onebot${change.fullReload ? '（全量）' : ''}`);
+    try {
+      if (payload.onebot !== undefined) {
+        if (typeof payload.onebot !== 'object' || payload.onebot === null) throw new HttpError(400, 'onebot 必须是对象');
+        const change = context.config.saveOnebot(payload.onebot);
+        changes.push(`onebot${change.fullReload ? '（全量）' : ''}`);
+      }
+      if (payload.network !== undefined) {
+        if (typeof payload.network !== 'object' || payload.network === null) throw new HttpError(400, 'network 必须是对象');
+        const change = context.config.saveNetwork(payload.network);
+        changes.push(`network（${change.changedConnections.length} 项变化）`);
+      }
+      if (changes.length === 0) throw new HttpError(400, '请求中没有 onebot 或 network 字段');
+    } catch (error) {
+      asHttpError(error);
     }
-    if (payload.network !== undefined) {
-      if (typeof payload.network !== 'object' || payload.network === null) throw new HttpError(400, 'network 必须是对象');
-      const change = context.config.saveNetwork(payload.network);
-      changes.push(`network（${change.changedConnections.length} 项变化）`);
-    }
-    if (changes.length === 0) throw new HttpError(400, '请求中没有 onebot 或 network 字段');
     sendJson(res, 200, { ok: true, changes, savedAt: Date.now() });
   });
 
@@ -66,8 +79,12 @@ export function registerConfigRoutes(router: Router, context: WebuiContext): voi
     const payload = await body();
     const data = payload.config ?? payload;
     if (typeof data !== 'object' || data === null) throw new HttpError(400, '导入内容必须是对象');
-    const changes = context.config.importAll(data);
-    sendJson(res, 200, { ok: true, sections: changes.map((change) => change.section) });
+    try {
+      const changes = context.config.importAll(data);
+      sendJson(res, 200, { ok: true, sections: changes.map((change) => change.section) });
+    } catch (error) {
+      asHttpError(error);
+    }
   });
 
   router.post('/api/config/reset', async ({ res, url }) => {
