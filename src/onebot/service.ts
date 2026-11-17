@@ -4,6 +4,7 @@ import type { Stats } from '../core/stats.ts';
 import type { AccountDriver } from '../driver/types.ts';
 import type { InboundMessage } from '../core/model.ts';
 import { MessageIdRegistry } from '../core/message-id.ts';
+import { MessageStore } from '../core/message-store.ts';
 import { createActionRegistry } from './actions/index.ts';
 import type { ActionRegistry } from './actions/registry.ts';
 import { buildHeartbeatEvent, buildLifecycleEvent, buildMessageEvent, buildNoticeEvent, buildRequestEvent } from './events.ts';
@@ -40,6 +41,8 @@ export interface OneBotServiceOptions {
 export class OneBotService {
   readonly registry: ActionRegistry;
   readonly messageIds: MessageIdRegistry;
+  /** Recent messages, backing `get_msg`. */
+  readonly messages = new MessageStore();
   readonly #logger: Logger;
   readonly #config: ConfigStore;
   readonly #driver: AccountDriver;
@@ -157,7 +160,20 @@ export class OneBotService {
     if (message.scene === 'private' && !config.events.privateMessage) return;
     if (message.scene === 'group' && !config.events.groupMessage) return;
     if (!message.self) this.#stats.incMessagesIn();
-    this.publish(buildMessageEvent(message, this.#eventContext()));
+    const event = buildMessageEvent(message, this.#eventContext());
+    this.messages.save({
+      nativeId: message.messageId,
+      ob11Id: Number(event.message_id) || 0,
+      scene: message.scene,
+      peerId: message.peer.id,
+      ...(message.peer.name ? { peerName: message.peer.name } : {}),
+      senderId: message.sender.id,
+      ...(message.sender.name ? { senderName: message.sender.name } : {}),
+      time: message.time,
+      self: message.self,
+      segments: message.segments,
+    });
+    this.publish(event);
   }
 
   /** Called by drivers when they publish a notice/request. */
@@ -257,6 +273,7 @@ export class OneBotService {
       config: this.#config.onebot,
       logger: this.#logger,
       messageIds: this.messageIds,
+      messages: this.messages,
       stats: this.#stats,
       selfId: () => this.#selfId,
       online: () => this.#online,

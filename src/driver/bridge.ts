@@ -1,6 +1,7 @@
 import type { AccountDriver, Capabilities, DriverContext, DriverOptions, SendResult } from './types.ts';
 import { capabilityMap } from './types.ts';
 import type {
+  AccountNotice,
   AccountStatus,
   Friend,
   Group,
@@ -21,7 +22,13 @@ const EVENT_INTERVAL_MS = 1000;
 interface BridgeStatusPayload {
   readonly message_ready?: boolean;
   readonly qr_ready?: boolean;
+  readonly phase?: string;
   readonly login_mode?: 'active' | 'passive';
+  /**
+   * Optional capability report. Runtimes that implement contract v2 send it;
+   * older ones omit it and keep the conservative v1 capability set.
+   */
+  readonly features?: Record<string, unknown>;
   readonly self_id?: number | string;
   readonly nickname?: string;
   readonly avatar?: string;
@@ -50,8 +57,16 @@ export class BridgeDriver implements AccountDriver {
   readonly id = 'bridge';
   readonly name = 'QQ 原生桥接';
   readonly description = '连接一个独立的 QQ 原生运行时（HTTP 契约），当前仅支持私聊文本。';
+  /**
+   * Starts at the v1 contract (private text + QR display) and converges on the
+   * runtime's own feature report. `qrLogin` stays true in passive mode because
+   * the console can still display the code the QQ window requested; whether a
+   * refresh works is reported separately by {@link qrInfo}.
+   */
+  readonly #caps: Capabilities = capabilityMap({ privateMessage: true, qrLogin: true });
+
   get capabilities(): Capabilities {
-    return capabilityMap({ privateMessage: true, qrLogin: this.#loginMode !== 'passive' });
+    return this.#caps;
   }
 
   readonly #context: DriverContext;
@@ -75,6 +90,12 @@ export class BridgeDriver implements AccountDriver {
   #polling = false;
   #lastError = '';
   #loginMode: 'active' | 'passive' | 'unknown' = 'unknown';
+  /** Native phase reported by the runtime (waiting_login, scan_qr, ...). */
+  #phase = '';
+  #qrRefreshable = true;
+  /** When the current QR image was first observed, used to derive expiry. */
+  #qrSeenAt = 0;
+  #qrHint = '';
 
   constructor(context: DriverContext, options: DriverOptions) {
     this.#context = context;
@@ -121,28 +142,86 @@ export class BridgeDriver implements AccountDriver {
 
   async qrCode(): Promise<QrPayload> {
     if (!this.#status.online) await this.#fetchQr();
-    return this.#qr;
+    return this.#composeQr();
   }
 
+  /**
+   * Ask the runtime for a new login code.
+   *
+   * Passive runtimes answer 409 because only the QQ window can request a code;
+   * active ones answer 202 and deliver the picture through GET /api/qr, so the
+   * refresh has to wait for it instead of returning an empty payload.
+   */
   async refreshQr(): Promise<QrPayload> {
-    const payload = await this.#request<{ picture?: string; image?: string; expires_at?: number; seq?: number; available?: boolean; accepted?: boolean }>(
-      '/api/qr/refresh',
-      'POST',
-    );
-    // The original native bridge returns 202 {accepted:true}; its QR image
-    // arrives later through GET /api/qr. Other runtimes may return it here.
-    this.#qr = payload.picture || payload.image
-      ? this.#qrFromPayload(payload)
-      : { state: 'none', seq: (this.#qr.seq ?? 0) + 1 };
-    this.#context.emit({ type: 'qr', qr: this.#qr });
-    if (!this.#qr.image) await this.#fetchQr();
-    return this.#qr;
+    if (this.#loginMode === 'passive') {
+      this.#qrRefreshable = false;
+      this.#qrHint = '被动模式：请在 QQ 客户端窗口里刷新二维码，本控制台会同步显示';
+      this.#publishQr();
+      return this.#composeQr();
+    }
+    try {
+      const payload = await this.#request<{
+        picture?: string;
+        image?: string;
+        expires_at?: number;
+        seq?: number;
+        available?: boolean;
+        accepted?: boolean;
+      }>('/api/qr/refresh', 'POST');
+      this.#qrRefreshable = true;
+      this.#qrHint = '';
+      if (payload.picture ?? payload.image) {
+        this.#qr = this.#qrFromPayload(payload);
+        this.#publishQr();
+        return this.#composeQr();
+      }
+      // 202 accepted: poll until the asynchronous picture shows up.
+      const before = this.#qr.image;
+      await this.#awaitQr(before, 6000);
+      return this.#composeQr();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (detail.includes('HTTP 409')) {
+        this.#qrRefreshable = false;
+        this.#qrHint = '被动模式：请在该 QQ 窗口内刷新二维码，本控制台会同步显示';
+        this.#publishQr();
+        return this.#composeQr();
+      }
+      if (detail.includes('HTTP 404') || detail.includes('HTTP 503')) {
+        this.#qrHint = `运行时暂时无法生成二维码：${detail}`;
+        this.#publishQr();
+        return this.#composeQr();
+      }
+      throw error;
+    }
   }
 
   async sendMessage(message: OutboundMessage): Promise<SendResult> {
-    if (message.scene !== 'private') throw new Error('桥接驱动仅支持私聊消息');
     const text = message.segments.map((segment) => (segment.type === 'text' ? segment.text : '')).join('');
-    if (!text.trim()) throw new Error('桥接驱动仅支持纯文本消息');
+    const plain = message.segments.every((segment) => segment.type === 'text');
+    if (!text.trim() && plain) throw new Error('消息内容为空');
+
+    // Contract v2 accepts any segment list; v1 only understands private text.
+    if (this.capabilities.groupMessage || !plain || message.scene === 'group') {
+      try {
+        const sent = await this.#request<{ message_id?: string | number }>('/api/send', 'POST', {
+          scene: message.scene,
+          peer_id: message.peerId,
+          segments: message.segments.map(toWireSegment),
+          ...(message.replyTo ? { reply_to: message.replyTo } : {}),
+        });
+        if (sent?.message_id !== undefined) return { messageId: String(sent.message_id) };
+        throw new Error('桥接服务未返回 message_id');
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (!detail.includes('HTTP 404')) throw error;
+        // Fall through to the legacy route for text-only private messages.
+        if (message.scene !== 'private' || !plain) throw error;
+      }
+    }
+
+    if (message.scene !== 'private') throw new Error('桥接驱动仅支持私聊消息（当前运行时未提供群发送）');
+    if (!plain) throw new Error('桥接驱动仅支持纯文本消息（当前运行时未提供媒体发送）');
     const sent = await this.#request<{ message_id?: string | number }>('/api/send-private', 'POST', {
       user_id: Number(message.peerId),
       message: text,
@@ -151,24 +230,76 @@ export class BridgeDriver implements AccountDriver {
     return { messageId: String(sent.message_id) };
   }
 
-  async recall(): Promise<void> {
-    throw new Error('桥接驱动未实现撤回');
+  async recall(messageId: string): Promise<void> {
+    if (!this.capabilities.recall) throw new Error('桥接驱动未提供撤回能力');
+    await this.#request('/api/recall', 'POST', { message_id: messageId });
   }
 
   async friendList(): Promise<Friend[]> {
-    throw new Error('桥接驱动未提供好友列表接口');
+    if (!this.capabilities.friendList) throw new Error('桥接驱动未提供好友列表接口');
+    const payload = await this.#request<{ items?: Array<Record<string, unknown>> }>('/api/friends');
+    return (payload?.items ?? []).map((item) => ({
+      id: String(item.user_id ?? ''),
+      name: String(item.nickname ?? item.user_id ?? ''),
+      ...(item.remark ? { remark: String(item.remark) } : {}),
+    }));
   }
 
   async groupList(): Promise<Group[]> {
-    throw new Error('桥接驱动未提供群列表接口');
+    if (!this.capabilities.groupList) throw new Error('桥接驱动未提供群列表接口');
+    const payload = await this.#request<{ items?: Array<Record<string, unknown>> }>('/api/groups');
+    return (payload?.items ?? []).map((item) => ({
+      id: String(item.group_id ?? ''),
+      name: String(item.group_name ?? item.group_id ?? ''),
+      ...(item.member_count !== undefined ? { memberCount: Number(item.member_count) } : {}),
+      ...(item.max_member_count !== undefined ? { maxMemberCount: Number(item.max_member_count) } : {}),
+    }));
   }
 
-  async strangerInfo(): Promise<StrangerInfo> {
-    throw new Error('桥接驱动未提供陌生人信息接口');
+  async strangerInfo(userId: string): Promise<StrangerInfo> {
+    if (!this.capabilities.strangerInfo) throw new Error('桥接驱动未提供陌生人信息接口');
+    const payload = await this.#request<Record<string, unknown>>(`/api/stranger?user_id=${encodeURIComponent(userId)}`);
+    return {
+      id: String(payload.user_id ?? userId),
+      name: String(payload.nickname ?? userId),
+      sex: payload.sex === 'male' || payload.sex === 'female' ? payload.sex : 'unknown',
+      ...(payload.age !== undefined ? { age: Number(payload.age) } : {}),
+    };
   }
 
-  async groupMemberInfo(): Promise<GroupMember> {
-    throw new Error('桥接驱动未提供群成员接口');
+  async groupMemberInfo(groupId: string, userId: string): Promise<GroupMember> {
+    if (!this.capabilities.groupMemberInfo) throw new Error('桥接驱动未提供群成员接口');
+    const payload = await this.#request<Record<string, unknown>>(
+      `/api/group-member?group_id=${encodeURIComponent(groupId)}&user_id=${encodeURIComponent(userId)}`,
+    );
+    return toMember(payload, groupId, userId);
+  }
+
+  async groupMemberList(groupId: string): Promise<GroupMember[]> {
+    if (!this.capabilities.groupMemberList) throw new Error('桥接驱动未提供群成员列表接口');
+    const payload = await this.#request<{ items?: Array<Record<string, unknown>> }>(
+      `/api/group-members?group_id=${encodeURIComponent(groupId)}`,
+    );
+    return (payload?.items ?? []).map((item) => toMember(item, groupId, String(item.user_id ?? '')));
+  }
+
+  async handleRequest(input: {
+    readonly flag: string;
+    readonly approve: boolean;
+    readonly type: 'friend' | 'group';
+    readonly subType?: string;
+  }): Promise<void> {
+    if (!this.capabilities.requestHandle) throw new Error('桥接驱动未提供请求处理能力');
+    await this.#request('/api/request', 'POST', {
+      flag: input.flag,
+      approve: input.approve,
+      type: input.type,
+      ...(input.subType ? { sub_type: input.subType } : {}),
+    });
+  }
+
+  qrInfo(): { refreshable: boolean; loginMode: 'active' | 'passive' | 'unknown' } {
+    return { refreshable: this.#qrRefreshable, loginMode: this.#loginMode };
   }
 
   async processInfo(): Promise<ProcessInfo> {
@@ -188,7 +319,9 @@ export class BridgeDriver implements AccountDriver {
     this.#polling = true;
     try {
       const payload = await this.#request<BridgeStatusPayload>('/api/status');
-      this.#loginMode = payload?.login_mode ?? 'unknown';
+      this.#applyLoginMode(payload?.login_mode);
+      if (payload?.phase) this.#phase = payload.phase;
+      if (payload?.features) this.#applyFeatures(payload.features);
       const online = Boolean(payload?.message_ready && payload?.self_id);
       const uin = payload?.self_id ? String(payload.self_id) : '';
       const next: AccountStatus = {
@@ -203,10 +336,7 @@ export class BridgeDriver implements AccountDriver {
       this.#lastError = '';
       this.#setStatus(next);
       if (!online && payload?.qr_ready && !this.#qr.image) await this.#fetchQr();
-      if (online && this.#qr.state !== 'none') {
-        this.#qr = { state: 'none', seq: this.#qr.seq };
-        this.#context.emit({ type: 'qr', qr: this.#qr });
-      }
+      this.#publishQr();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       if (detail !== this.#lastError) {
@@ -221,15 +351,25 @@ export class BridgeDriver implements AccountDriver {
 
   async #fetchQr(): Promise<void> {
     try {
-      const response = await this.#request<{ picture?: string; image?: string; expires_at?: number; seq?: number; available?: boolean }>('/api/qr');
+      const response = await this.#request<{
+        picture?: string;
+        image?: string;
+        expires_at?: number;
+        seq?: number;
+        available?: boolean;
+        phase?: string;
+        login_mode?: 'active' | 'passive';
+      }>('/api/qr');
+      if (response?.phase) this.#phase = response.phase;
+      if (response?.login_mode) this.#applyLoginMode(response.login_mode);
       const next = this.#qrFromPayload(response);
-      if (next.image && next.image !== this.#qr.image) {
-        this.#qr = next;
-        this.#context.emit({ type: 'qr', qr: next });
-      }
+      if (next.image !== this.#qr.image) this.#qr = next;
+      this.#publishQr();
     } catch (error) {
-      // A 404 means the asynchronous QR request is still in progress.
+      // A 404 means the runtime has no code right now (async request pending),
+      // which is a state, not a transport failure.
       if (!(error instanceof Error && error.message.includes('HTTP 404'))) throw error;
+      this.#publishQr();
     }
   }
 
@@ -247,8 +387,15 @@ export class BridgeDriver implements AccountDriver {
       for (const envelope of events) {
         const data = envelope?.data;
         if (!data) continue;
-        const message = this.#toMessage(data);
-        if (message) this.#push(message);
+        const postType = String(data.post_type ?? '');
+        if (postType === 'message' || postType === 'message_sent') {
+          const message = this.#toMessage(data);
+          if (message) this.#push(message);
+        } else if (postType === 'notice') {
+          this.#emitNotice(data);
+        } else if (postType === 'request') {
+          this.#emitRequest(data);
+        }
       }
       this.#cursor = Math.max(this.#cursor, nextCursor);
     } catch {
@@ -288,19 +435,104 @@ export class BridgeDriver implements AccountDriver {
     return segments;
   }
 
-  #qrFromPayload(payload: { picture?: string; image?: string; expires_at?: number; seq?: number; available?: boolean } | null): QrPayload {
+  #qrFromPayload(payload: {
+    picture?: string;
+    image?: string;
+    expires_at?: number;
+    seq?: number;
+    available?: boolean;
+  } | null): QrPayload {
     const picture = payload?.picture ?? payload?.image;
     if (!payload || payload.available === false || !picture) {
-      // The bridge reports "no code" while the account is already signed in.
-      return { state: this.#status.online ? 'none' : 'expired', seq: (this.#qr.seq ?? 0) + 1 };
+      return { state: this.#status.online ? 'none' : 'expired', seq: this.#qr.seq };
     }
     const image = picture.startsWith('data:') ? picture : `data:image/png;base64,${picture}`;
+    if (image !== this.#qr.image) this.#qrSeenAt = Date.now();
+    const expires = payload.expires_at
+      ? payload.expires_at * (payload.expires_at < 1e12 ? 1000 : 1)
+      : (this.#qrSeenAt || Date.now()) + 120_000;
     return {
       state: 'waiting',
       image,
-      expiresAt: payload.expires_at ? payload.expires_at * (payload.expires_at < 1e12 ? 1000 : 1) : Date.now() + 120_000,
-      seq: payload.seq ?? (this.#qr.seq ?? 0) + 1,
+      expiresAt: expires,
+      seq: Math.max(this.#qr.seq, payload.seq ?? 0) || 1,
+      refreshable: this.#qrRefreshable,
+      loginMode: this.#loginMode,
     };
+  }
+
+  /**
+   * Map the native login phase onto the console's QR states.
+   *
+   * The native runtime is the source of truth: it knows whether a code is on
+   * screen (`scan_qr`), already scanned (`confirm_on_phone`), failed
+   * (`qr_failed`) or irrelevant because the session is authenticated.
+   */
+  #composeQr(): QrPayload {
+    const seq = this.#qr.seq;
+    if (this.#qr.image && this.#qr.expiresAt && Date.now() > this.#qr.expiresAt) {
+      return { ...this.#qr, state: 'expired', hint: '二维码已过期，请刷新' };
+    }
+    if (this.#qr.image) {
+      return { ...this.#qr, refreshable: this.#qrRefreshable, loginMode: this.#loginMode };
+    }
+    if (this.#status.online) return { state: 'none', seq, refreshable: this.#qrRefreshable, loginMode: this.#loginMode };
+    switch (this.#phase) {
+      case 'confirm_on_phone':
+        return { state: 'scanned', seq, refreshable: this.#qrRefreshable, loginMode: this.#loginMode, hint: '已扫码，请在手机上确认登录' };
+      case 'qr_failed':
+        return { state: 'expired', seq, refreshable: this.#qrRefreshable, loginMode: this.#loginMode, hint: this.#qrHint || '二维码会话失败，请刷新重试' };
+      case 'authenticated':
+        return { state: 'confirmed', seq, refreshable: this.#qrRefreshable, loginMode: this.#loginMode };
+      case 'waiting_official_qq_login':
+        return {
+          state: 'unavailable',
+          seq,
+          refreshable: this.#qrRefreshable,
+          loginMode: this.#loginMode,
+          hint:
+            this.#qrHint ||
+            '运行时处于被动模式：需要在 QQ 客户端窗口点开“扫码登录”，二维码会自动同步到这里',
+        };
+      case 'starting':
+      case 'checking_session':
+        return {
+          state: 'unavailable',
+          seq,
+          refreshable: this.#qrRefreshable,
+          loginMode: this.#loginMode,
+          hint: '运行时正在初始化登录服务，请稍候',
+        };
+      case 'error':
+        return { state: 'unavailable', seq, refreshable: this.#qrRefreshable, loginMode: this.#loginMode, hint: this.#qrHint || '运行时报告登录错误' };
+      default:
+        return {
+          state: 'unavailable',
+          seq,
+          refreshable: this.#qrRefreshable,
+          loginMode: this.#loginMode,
+          hint: this.#qrHint || '尚未获取到可扫描的二维码',
+        };
+    }
+  }
+
+  /** Emit a QR update only when the console would actually see a change. */
+  #publishQr(): void {
+    const next = this.#composeQr();
+    if (JSON.stringify(next) === JSON.stringify(this.#qr)) return;
+    this.#qr = next;
+    this.#context.emit({ type: 'qr', qr: next });
+  }
+
+  /** Poll GET /api/qr until a (new) picture arrives or the timeout elapses. */
+  async #awaitQr(previous: string | undefined, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await this.#fetchQr();
+      if (this.#qr.image && this.#qr.image !== previous) return;
+      if (this.#phase === 'qr_failed' || this.#phase === 'error') return;
+    }
   }
 
   async #request<T>(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown): Promise<T> {
@@ -323,6 +555,45 @@ export class BridgeDriver implements AccountDriver {
     return (await response.json()) as T;
   }
 
+  /**
+   * Passive runtimes can only mirror the code the QQ window asks for, so the
+   * console must not offer a refresh button that can never work.
+   */
+  #applyLoginMode(mode?: 'active' | 'passive'): void {
+    if (!mode) return;
+    this.#loginMode = mode;
+    this.#qrRefreshable = mode === 'active';
+    if (mode === 'passive') {
+      this.#qrHint = '被动模式：需要在 QQ 客户端窗口里打开“扫码登录”，二维码会自动同步到这里';
+    } else {
+      this.#qrHint = '';
+    }
+  }
+
+  /**
+   * Capabilities are not static for this driver: the runtime tells us what it
+   * can actually do, and the action layer gates on that report. Anything the
+   * runtime does not claim stays unavailable with an explicit error.
+   */
+  #applyFeatures(features: Record<string, unknown>): void {
+    const caps = this.#caps as unknown as Record<string, boolean>;
+    let changed = false;
+    for (const [key, value] of Object.entries(features)) {
+      if (!(key in caps) || typeof value !== 'boolean' || key === 'qrLogin') continue;
+      if (caps[key] !== value) {
+        caps[key] = value;
+        changed = true;
+      }
+    }
+    if (changed) {
+      const enabled = Object.entries(features)
+        .filter(([, value]) => value === true)
+        .map(([key]) => key)
+        .join(', ');
+      this.#context.logger.info('driver:bridge', `运行时能力更新：${enabled || '（仅基础能力）'}`);
+    }
+  }
+
   #setStatus(next: AccountStatus): void {
     const changed = JSON.stringify(this.#status) !== JSON.stringify(next);
     this.#status = next;
@@ -334,4 +605,107 @@ export class BridgeDriver implements AccountDriver {
     if (this.#inbox.length > 200) this.#inbox.pop();
     this.#context.emit({ type: 'message', message });
   }
+
+  /**
+   * Notice/request events arrive through the same event stream as messages.
+   * Unknown shapes are dropped instead of being reported as fake notifications.
+   */
+  #emitNotice(data: Record<string, unknown>): void {
+    const noticeType = String(data.notice_type ?? '');
+    const groupId = String(data.group_id ?? '');
+    const userId = String(data.user_id ?? data.operator_id ?? '');
+    const scene: 'private' | 'group' = groupId ? 'group' : 'private';
+    const peer = { id: groupId || userId };
+    const user = { id: userId };
+    const map: Record<string, AccountNotice['kind']> = {
+      friend_recall: 'friend_recall',
+      group_recall: 'group_recall',
+      group_increase: 'group_increase',
+      group_decrease: 'group_decrease',
+      group_admin: 'group_admin',
+      group_ban: 'group_ban',
+      group_upload: 'group_upload',
+    };
+    const kind = map[noticeType];
+    if (!kind) return;
+    this.#context.emit({
+      type: 'notice',
+      notice: {
+        kind,
+        time: Number(data.time ?? Math.floor(Date.now() / 1000)),
+        scene,
+        peer,
+        user,
+        detail: { ...data, message_id: data.message_id, operator_id: data.operator_id },
+      },
+    });
+  }
+
+  #emitRequest(data: Record<string, unknown>): void {
+    const type = data.request_type === 'group' ? 'group' : 'friend';
+    const groupId = String(data.group_id ?? '');
+    this.#context.emit({
+      type: 'request',
+      request: {
+        kind: type,
+        time: Number(data.time ?? Math.floor(Date.now() / 1000)),
+        scene: type === 'group' ? 'group' : 'private',
+        peer: { id: groupId || String(data.user_id ?? '') },
+        user: { id: String(data.user_id ?? '') },
+        comment: String(data.comment ?? ''),
+        flag: String(data.flag ?? ''),
+        detail: { sub_type: data.sub_type },
+      },
+    });
+  }
+}
+
+/**
+ * Wire segment for contract v2. The native runtime speaks OneBot-shaped
+ * segments, so the conversion is explicit and local to this adapter instead of
+ * pulling the protocol layer into the driver.
+ */
+function toWireSegment(segment: Segment): Record<string, unknown> {
+  switch (segment.type) {
+    case 'text':
+      return { type: 'text', data: { text: segment.text } };
+    case 'face':
+      return { type: 'face', data: { id: segment.id } };
+    case 'image':
+      return { type: 'image', data: { file: segment.file, ...(segment.url ? { url: segment.url } : {}) } };
+    case 'at':
+      return { type: 'at', data: { qq: segment.target } };
+    case 'reply':
+      return { type: 'reply', data: { id: segment.id } };
+    case 'record':
+      return { type: 'record', data: { file: segment.file, ...(segment.url ? { url: segment.url } : {}) } };
+    case 'video':
+      return { type: 'video', data: { file: segment.file, ...(segment.url ? { url: segment.url } : {}) } };
+    case 'file':
+      return {
+        type: 'file',
+        data: {
+          file: segment.file,
+          ...(segment.name ? { name: segment.name } : {}),
+          ...(segment.size !== undefined ? { file_size: segment.size } : {}),
+        },
+      };
+    case 'json':
+      return { type: 'json', data: { data: segment.data } };
+    case 'markdown':
+      return { type: 'markdown', data: { content: segment.content } };
+    default:
+      return { type: 'text', data: { text: '' } };
+  }
+}
+
+function toMember(payload: Record<string, unknown>, groupId: string, userId: string): GroupMember {
+  const role = payload.role === 'owner' || payload.role === 'admin' ? payload.role : 'member';
+  return {
+    groupId: String(payload.group_id ?? groupId),
+    userId: String(payload.user_id ?? userId),
+    name: String(payload.nickname ?? payload.card ?? userId),
+    ...(payload.card ? { card: String(payload.card) } : {}),
+    role,
+  };
 }

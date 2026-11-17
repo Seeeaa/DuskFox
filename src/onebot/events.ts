@@ -15,7 +15,13 @@ function base(ctx: EventContext, postType: Ob11EventBase['post_type'], extra: Re
   return { time: Math.floor(Date.now() / 1000), self_id: ctx.selfId(), post_type: postType, ...extra };
 }
 
-/** Build `message` (or `message_sent`) events from an inbound driver message. */
+/**
+ * Build `message` or `message_sent` events from an inbound driver message.
+ *
+ * OneBot defines `message_sent` for messages this account sent itself; NapCat
+ * uses the same split, so frameworks that toggle `report_self_message` get the
+ * event type they expect instead of a normal `message` with a self sender.
+ */
 export function buildMessageEvent(message: InboundMessage, ctx: EventContext): Ob11EventBase {
   const config = ctx.config();
   const format = config.messagePostFormat;
@@ -34,17 +40,18 @@ export function buildMessageEvent(message: InboundMessage, ctx: EventContext): O
     sender,
     ...(config.debug && message.raw !== undefined ? { raw: message.raw } : {}),
   };
+  const postType = message.self ? 'message_sent' : 'message';
   if (message.scene === 'group') {
-    return base(ctx, 'message', {
+    return base(ctx, postType, {
       message_type: 'group',
-      sub_type: message.self ? 'normal' : 'normal',
+      sub_type: 'normal',
       group_id: Number(message.peer.id) || 0,
       ...common,
     });
   }
-  return base(ctx, 'message', {
+  return base(ctx, postType, {
     message_type: 'private',
-    sub_type: message.self ? 'self' : 'friend',
+    sub_type: 'friend',
     user_id: Number(message.peer.id) || 0,
     ...common,
   });

@@ -22,14 +22,16 @@
 | SSE 事件流 | 已实现 |
 | 消息段数组 / CQ 码字符串两种格式 | 已实现 |
 | 事件：message.private / message.group / meta_event / notice / request | 已实现 |
-| 动作：13 个（登录信息、状态、版本、发送私聊/群、撤回、好友/群列表…） | 已实现 |
+| 动作：17 个（登录信息、状态、版本、发送私聊/群、撤回、get_msg、好友/群/成员/陌生人资料、请求处理） | 已实现 |
 | 配置热重载（改端口才重启监听，改令牌不踢连接） | 已实现 |
 | 管理控制台（令牌登录、9 个页面、SSE 实时日志与事件） | 已实现 |
 | 插件（进程内 ESM，事件钩子 + 动作调用） | 已实现 |
 | 模拟账号驱动（无需 QQ 即可全链路联调） | 已实现 |
-| 原生桥接驱动（连接外部 QQ 运行时） | 已实现，需外部运行时 |
+| 原生桥接驱动（连接外部 QQ 运行时，契约 v2） | 已实现，需外部运行时 |
+| 二维码：主动 / 被动两种语义（被动不可主动刷新，界面置灰并说明） | 已实现（真实 QQ 未验） |
 | 真实 QQ 会话 / 扫码登录 | 依赖原生运行时，未随仓库提供 |
-| 群成员列表、合并转发、富媒体收发 | 未实现（动作会明确返回 1200/1404） |
+| 群管理（禁言/踢人/名片/公告）、合并转发、文件上传、历史消息 | 未实现（动作会明确返回 1404 / 能力位为 false） |
+| 媒体**发送**（图片/语音/视频/文件上传） | 未实现（仅消息段透传，无上传通道） |
 
 ## 2. 快速开始
 
@@ -181,9 +183,13 @@ WebSocket 握手失败直接断开。
 
 ### 6.2 动作
 
-`get_login_info`、`get_status`、`get_version_info`、`can_send_image`、`can_send_record`、
-`get_friend_list`、`get_group_list`、`get_stranger_info`、`get_group_member_info`、
-`send_private_msg`、`send_group_msg`、`send_msg`、`delete_msg`。
+系统：`get_login_info`、`get_status`、`get_version_info`、`can_send_image`、`can_send_record`。
+消息：`send_private_msg`、`send_group_msg`、`send_msg`、`delete_msg`、`get_msg`。
+资料：`get_friend_list`、`get_group_list`、`get_stranger_info`、`get_group_member_info`、`get_group_member_list`。
+请求：`set_friend_add_request`、`set_group_add_request`。
+
+`get_msg` 查的是框架内最近 500 条消息窗口（与 message_id 映射同一窗口），超出返回 1404；
+不提供历史消息与合并转发（需要运行时的数据包通道）。
 
 - 兼容 `_async`、`_rate_limited` 后缀别名（go-cqhttp 时代习惯）。
 - 参数经 TypeBox 校验：字符串数字会自动转换，缺失字段用默认值补齐，错误返回 `retcode: 1400`。
@@ -199,6 +205,17 @@ WebSocket 握手失败直接断开。
 
 `message_id` 是正整数：默认由 `md5(原生id|会话|对象)` 取 31 位得到，稳定可复现；
 最近 5000 条保留双向映射，超出后旧 id 会失效（与 NapCat 的设计取舍一致，不做数据库）。
+
+### 6.4 二维码：主动与被动
+
+`/api/qr` 返回状态机：`none` / `waiting` / `scanned` / `confirmed` / `expired` / `unavailable`，
+并附带 `refreshable`、`loginMode`、`hint`。
+
+- **主动模式**：`POST /api/qr/refresh` 返回 202，运行时的图片通过 `GET /api/qr` 异步到达，
+  框架最多等 6 秒并返回新图；
+- **被动模式**：运行时只能镜像 QQ 窗口请求的二维码，刷新返回 409；控制台把按钮置灰并显示原因。
+- 解除 noVNC 依赖的方案（Xvfb + 被动镜像、受控主动取码、运行时改动清单）见
+  [docs/native-runtime.md](docs/native-runtime.md)。
 
 ## 7. 驱动
 
@@ -217,10 +234,15 @@ WebSocket 握手失败直接断开。
 
 | 接口 | 方向 | 说明 |
 |---|---|---|
-| `GET /api/status` | 读 | `{ message_ready, self_id, nickname, pid, cpu, memory_mb, version }` |
+| `GET /api/status` | 读 | `{ message_ready, self_id, nickname, pid, cpu, memory_mb, version, phase, login_mode, qr_ready, features }` |
 | `GET /api/events?after=<cursor>` | 读 | `{ cursor, events: [{ cursor, data }] }`，`data` 为 OneBot 风格事件 |
 | `POST /api/send-private` | 写 | `{ user_id, message }` → `{ message_id }` |
-| `GET/POST /api/qr[/refresh]` | 读 | `{ picture: base64, expires_at, seq }` |
+| `GET/POST /api/qr[/refresh]` | 读 | `{ picture, expires_at, seq, phase, login_mode }`；刷新 202 异步 / 409 被动 |
+| `POST /api/send` | 写 | `{ scene, peer_id, segments }` → `{ message_id }`（v2，群与媒体；不支持时 404 回退 v1） |
+| `GET /api/friends`、`/api/groups`、`/api/stranger`、`/api/group-member`、`/api/group-members` | 读 | v2 资料查询，缺哪个就关掉对应动作 |
+| `POST /api/recall`、`/api/request` | 写 | v2 撤回与请求处理 |
+
+运行时在 `/api/status.features` 里声明能力，框架只打开声明为 `true` 的项，其余保持“不支持”。
 
 启动：`node dist/main.js --driver bridge --bridge-url http://127.0.0.1:16082 --bridge-token <token>`。
 桥接不可用时，控制台会显示“桥接服务不可用”并在 `/api/status` 的 `account.detail` 里给出原因，
@@ -295,11 +317,26 @@ OneBot HTTP 直连、反向/正向 WS 的动作与事件、桥接驱动契约、
 
 ## 12. 未完成 / 下一步
 
-1. 原生 QQ 运行时（扫码登录、真实会话）——当前通过 `bridge` 驱动对接，仓库不含运行时。
-2. 群成员列表、合并转发、富媒体（图片/语音/文件）的端到端收发。
-3. HTTP POST 上报的双向快速操作（上报响应里回动作）。
+逐项差距（含 NapCat 206 动作、SnowLuma 222 动作的对照）见
+[docs/napcat-gap.md](docs/napcat-gap.md)；QQ 进程内接入点与未知项见
+[docs/qq-attach-points.md](docs/qq-attach-points.md)。
+
+1. 原生 QQ 运行时（扫码登录、真实会话）——当前通过 `bridge` 驱动对接，仓库不含运行时；
+   真实 QQ 收发本轮未验收（服务器不可达、本机不碰大号）。
+2. 群管理动作、合并转发、历史消息、媒体上传/下载——需要运行时提供内核或数据包能力。
+3. HTTP POST 上报的双向快速操作与 `x-signature`。
 4. 通知（上线/掉线/错误）通道，控制台已占位并标注未实现。
 
 ## License
 
-MIT，见 `LICENSE`。
+源码可用、**非商业**许可，见 [LICENSE](LICENSE)。要点：
+
+- 允许阅读、复制、修改、非商业自用/研究/教学；
+- 出售、付费分发、随商业产品分发、以本软件提供付费服务，需书面授权；
+- 再分发需保留许可与署名；公开分发修改版需书面许可；
+- 不得基于本软件开发并分发同类竞品；
+- 不是 OSI 认可的开源许可。如需商用授权请联系版权持有人。
+
+> 历史说明：本仓库早期版本使用 MIT；在公开发布前已按项目要求改为非商业许可
+> （旧的 MIT 声明不再适用）。仓库不含任何 QQ 客户端文件或第三方专有二进制，
+> 真实 QQ 运行时的合规责任由使用者自行承担。

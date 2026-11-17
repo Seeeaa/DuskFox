@@ -202,11 +202,36 @@ export class Application implements WebuiContext {
       transport('http-client', 'HTTP 上报', 'HTTP 客户端 POST'),
       transport('sse', 'SSE', '事件流'),
       {
-        key: 'qr',
-        label: '扫码登录',
-        detail: capabilitiesDetail(caps.qrLogin, 'GET /api/qr'),
-        state: caps.qrLogin ? 'yes' : 'no',
+        key: 'roster',
+        label: '群成员列表',
+        detail: 'get_group_member_list',
+        state: caps.groupMemberList ? 'yes' : 'no',
       },
+      {
+        key: 'query',
+        label: '消息查询',
+        detail: `get_msg · 最近 ${this.service.messages.size} 条窗口`,
+        state: caps.messageQuery ? 'yes' : 'no',
+      },
+      {
+        key: 'requests',
+        label: '请求处理',
+        detail: 'set_friend_add_request / set_group_add_request',
+        state: caps.requestHandle ? 'yes' : 'no',
+      },
+      (() => {
+        const info = this.driver.qrInfo?.();
+        const passive = info?.loginMode === 'passive';
+        const refreshable = info?.refreshable !== false;
+        return {
+          key: 'qr',
+          label: '扫码登录',
+          detail: passive
+            ? 'GET /api/qr · 被动模式（需 QQ 客户端窗口出码，控制台同步显示）'
+            : 'GET /api/qr · 主动模式',
+          state: !caps.qrLogin ? 'no' : refreshable ? 'yes' : 'partial',
+        } satisfies CapabilityRow;
+      })(),
       {
         key: 'plugins',
         label: '插件机制',

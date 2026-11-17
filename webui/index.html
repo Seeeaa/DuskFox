@@ -629,7 +629,7 @@ var API={status:{m:'GET',p:'/api/status'},config:{m:'GET',p:'/api/config'},logs:
 var T0=Date.now();
 var S={demo:'normal',stat:{rx:0,tx:0,conn:0,epm:0},
  acct:{uin:'',nick:'',online:false,via:'未登录',avatar:''},
- proc:{pid:'—',cpu:null,mem:null,ver:'—',args:'—',running:false},procAvail:false,procNote:'',
+ proc:{pid:'—',cpu:null,mem:null,ver:'—',args:'—',running:false},procAvail:false,procNote:'',procCtl:false,
  net:{'http-server':[],'ws-client':[],'http-client':[],'sse':[],'ws-server':[]},
  ob:{fmt:'array',reportSelf:false,heartbeat:30000,idMode:'hash',debug:false,ignoreGroup:false},
  evt:{privateMessage:true,groupMessage:true,metaEvent:true,notice:true,request:true},
@@ -780,27 +780,52 @@ function loadQr(){
   var h=$('#qrhint');if(h)h.innerHTML='<span style="color:var(--accent)">'+E(err.message||'二维码读取失败')+'</span>';
  });
 }
-function paintQr(){
- var img=$('#qri'),hint=$('#qrhint'),box=$('#qr');
- if(!img)return;
- if(S.qr&&S.qr.image){
-  img.src=S.qr.image;img.style.display='block';if(box)box.classList.remove('ex');
-  if(hint)hint.innerHTML=(S.qr.mock?'<b>模拟驱动</b>：二维码不可扫描，仅用于界面联调。':'二维码由当前驱动生成。')+'<br>剩余 <b id="ql">—</b> 秒';
- }else{
-  img.removeAttribute('src');img.style.display='none';if(box)box.classList.toggle('ex',!!(S.qr&&S.qr.state==='expired'));
-  if(hint)hint.innerHTML=(S.acct.online?'账号已在线，没有待扫描的二维码。':'当前没有待扫描的二维码，点击下方按钮重新获取。');
+function qrModeLabel(q){
+ if(!q||!q.loginMode||q.loginMode==='unknown')return '';
+ return q.loginMode==='passive'?'被动模式':'主动模式';
+}
+function qrHintText(q){
+ if(!q)return '尚未获取到二维码。';
+ if(q.hint)return E(q.hint);
+ switch(q.state){
+  case 'waiting':return (q.mock?'<b>模拟驱动</b>：二维码不可扫描，仅用于界面联调。':'二维码由当前驱动生成。')+'<br>剩余 <b id="ql">—</b> 秒';
+  case 'scanned':return '已扫码，请在手机上确认登录。';
+  case 'confirmed':return '登录成功，正在初始化会话…';
+  case 'expired':return '二维码已过期。';
+  case 'none':return S.acct.online?'账号已在线，没有待扫描的二维码。':'当前没有待扫描的二维码。';
+  default:return '暂时没有可扫描的二维码。';
  }
+}
+function paintQr(){
+ var img=$('#qri'),hint=$('#qrhint'),box=$('#qr'),btn=$('#qrf'),mode=$('#qrmode');
+ if(!img)return;
+ var q=S.qr||{state:'none'};
+ if(q.image&&q.state==='waiting'){
+  img.src=q.image;img.style.display='block';if(box)box.classList.remove('ex');
+ }else{
+  img.removeAttribute('src');img.style.display='none';
+  if(box)box.classList.toggle('ex',q.state==='expired'||q.state==='scanned'||q.state==='confirmed');
+ }
+ if(hint)hint.innerHTML=qrHintText(q);
+ if(btn){
+  var canRefresh=q.refreshable!==false;
+  btn.disabled=!canRefresh;
+  btn.style.opacity=canRefresh?'1':'.45';
+  btn.title=canRefresh?'':'该运行时无法主动刷新二维码';
+ }
+ if(mode)mode.textContent=qrModeLabel(q);
  updateQrCountdown();
 }
 function updateQrCountdown(){
  var ql=$('#ql');if(!ql)return;
- if(!S.qr||S.qr.state!=='waiting'||!S.qr.expiresAt){ql.textContent=S.qr&&S.qr.state==='expired'?'已过期':'—';return}
- ql.textContent=Math.max(0,Math.round((S.qr.expiresAt-Date.now())/1000));
+ var q=S.qr||{};
+ if(q.state!=='waiting'||!q.expiresAt){ql.textContent=q.state==='expired'?'已过期':'—';return}
+ ql.textContent=Math.max(0,Math.round((q.expiresAt-Date.now())/1000));
 }
 function procBody(){
  var p=S.proc;
  return '<dl class="kv"><dt>状态</dt><dd>'+(p.running?'<span class="tg a">运行中</span>':'<span class="tg n">未运行</span>')+'</dd><dt>PID</dt><dd class="mono">'+(p.pid||'—')+'</dd><dt>CPU / 内存</dt><dd>'+(p.cpu==null?'—':p.cpu)+'% / '+(p.mem==null?'—':p.mem)+' MB</dd><dt>版本</dt><dd>'+E(p.ver||'—')+'</dd><dt>启动参数</dt><dd class="mono">'+E(p.args||'—')+'</dd></dl>'+
-  (S.procAvail?'<div class="row" style="margin-top:20px"><button class="btn g s" data-act="ps" data-v="start">启动</button><button class="btn g s" data-act="ps" data-v="restart">重启</button><button class="btn g s" data-act="ps" data-v="stop">停止</button></div>':'')+
+  (S.procCtl?'<div class="row" style="margin-top:20px"><button class="btn g s" data-act="ps" data-v="start">启动</button><button class="btn g s" data-act="ps" data-v="restart">重启</button><button class="btn g s" data-act="ps" data-v="stop">停止</button></div>':'')+
   (S.procNote?'<div class="note" style="margin-top:16px">'+E(S.procNote)+'</div>':'');
 }
 function loadProcess(){
@@ -809,9 +834,11 @@ function loadProcess(){
   if(d&&d.available===false){
    S.proc={pid:'—',cpu:null,mem:null,ver:'—',args:'—',running:false};
    S.procNote=d.note||'当前驱动不提供进程信息';
+   S.procCtl=false;
   }else{
    S.proc={pid:d.pid||'—',cpu:d.cpu==null?null:d.cpu,mem:d.memoryMb==null?null:d.memoryMb,ver:d.version||'—',args:d.args||'—',running:!!d.running};
    S.procNote='';
+   S.procCtl=!!d.controllable;
   }
   var el=$('#procbody');if(el&&cur==='account')el.innerHTML=procBody();
  }).catch(function(){});
@@ -852,7 +879,7 @@ P.account={n:'账号',r:function(){
     b.innerHTML='<div class="note">当前驱动不支持账号密码登录，也不会在本页保存密码。</div><div class="ff">'+fld('QQ 号','','u',{dis:1})+fld('密码','','p',{dis:1,type:'password'})+'</div><button class="btn" disabled>登录</button>';
     return;
    }
-   b.innerHTML='<div class="row" style="gap:32px;align-items:flex-start"><div class="qr" id="qr"><img id="qri" alt="登录二维码"></div><div style="flex:1;min-width:220px"><p>使用手机 QQ 扫描二维码。</p><p class="muted" style="font-size:13px;margin:6px 0 18px" id="qrhint">正在获取二维码…<br>剩余 <b id="ql">—</b> 秒</p><button class="btn s" id="qrf" data-act="qrrefresh">刷新二维码</button></div></div>';
+   b.innerHTML='<div class="row" style="gap:32px;align-items:flex-start"><div class="qr" id="qr"><img id="qri" alt="登录二维码"></div><div style="flex:1;min-width:220px"><p>使用手机 QQ 扫描二维码。<span class="src" id="qrmode" style="margin-left:8px"></span></p><p class="muted" style="font-size:13px;margin:6px 0 18px" id="qrhint">正在获取二维码…</p><button class="btn s" id="qrf" data-act="qrrefresh">刷新二维码</button></div></div>';
    loadQr();
   };
   tab('qr');
@@ -1316,7 +1343,14 @@ async function handleAct(a,e){
   return;
  }
  if(act==='ps'){var v=a.dataset.v;return withBusy(a,'处理中',async function(){await api('POST','/api/process/'+v);toast('已提交','POST /api/process/'+v);await loadProcess();render()})}
- if(act==='qrrefresh'){return withBusy(a,'刷新中',async function(){var d=await api('POST','/api/qr/refresh');S.qr=d;paintQr();toast('二维码已刷新')})}
+ if(act==='qrrefresh'){
+  return withBusy(a,'刷新中',async function(){
+   var d=await api('POST','/api/qr/refresh');S.qr=d;paintQr();
+   if(d&&d.refreshable===false)toast('无法主动刷新',d.hint||'该运行时只能由 QQ 客户端窗口刷新二维码');
+   else if(d&&d.image)toast('二维码已刷新');
+   else toast('已请求刷新',(d&&d.hint)||'正在等待运行时返回二维码');
+  });
+ }
  if(act==='nopen'){nopen=nopen===a.dataset.id?null:a.dataset.id;P.network.draw();return}
  if(act==='nadd'){S.net[ntab].push(newConn());await saveNetwork(true);nopen=ntab+(S.net[ntab].length-1);P.network.draw();toast('已新增','尚未启用，保存后生效');return}
  if(act==='ndel'){

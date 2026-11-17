@@ -38,8 +38,16 @@ export interface Capabilities {
   readonly recall: boolean;
   readonly friendList: boolean;
   readonly groupList: boolean;
+  readonly groupInfo: boolean;
   readonly strangerInfo: boolean;
   readonly groupMemberInfo: boolean;
+  readonly groupMemberList: boolean;
+  /** Whether recent messages can be queried through the framework store. */
+  readonly messageQuery: boolean;
+  /** Whether friend/group join requests can be approved or rejected. */
+  readonly requestHandle: boolean;
+  /** Whether media can be downloaded to a local path. */
+  readonly mediaDownload: boolean;
   readonly processControl: boolean;
   readonly qrLogin: boolean;
   readonly quickLogin: boolean;
@@ -66,8 +74,13 @@ export function capabilityMap(values: Partial<Capabilities>): Capabilities {
     recall: false,
     friendList: false,
     groupList: false,
+    groupInfo: false,
     strangerInfo: false,
     groupMemberInfo: false,
+    groupMemberList: false,
+    messageQuery: true,
+    requestHandle: false,
+    mediaDownload: false,
     processControl: false,
     qrLogin: false,
     quickLogin: false,
@@ -116,7 +129,17 @@ export interface AccountDriver {
   groupList(): Promise<Group[]>;
   strangerInfo(userId: string): Promise<StrangerInfo>;
   groupMemberInfo(groupId: string, userId: string): Promise<GroupMember>;
+  groupMemberList?(groupId: string): Promise<GroupMember[]>;
+  /** Approve or reject a friend/group request identified by `flag`. */
+  handleRequest?(input: {
+    readonly flag: string;
+    readonly approve: boolean;
+    readonly type: 'friend' | 'group';
+    readonly subType?: string;
+  }): Promise<void>;
   // Optional diagnostics.
+  /** How login codes are obtained, for honest capability reporting. */
+  qrInfo?(): { readonly refreshable: boolean; readonly loginMode: 'active' | 'passive' | 'unknown' };
   processInfo?(): Promise<ProcessInfo>;
   controlProcess?(action: 'start' | 'restart' | 'stop'): Promise<void>;
   // Optional notices/requests feed used by tests and advanced drivers.

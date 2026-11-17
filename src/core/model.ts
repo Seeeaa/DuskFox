@@ -208,14 +208,22 @@ export interface ProcessInfo {
   readonly args?: string;
 }
 
+export type QrState = 'none' | 'waiting' | 'scanned' | 'confirmed' | 'expired' | 'unavailable';
+
 export interface QrPayload {
   /** `none` while the account is online or no login is pending. */
-  readonly state: 'none' | 'waiting' | 'scanned' | 'expired';
+  readonly state: QrState;
   /** PNG data URL ready to drop into an <img>. */
   readonly image?: string;
   readonly expiresAt?: number;
   /** Bumped every time a new code is issued so the console can poll cheaply. */
   readonly seq: number;
+  /** False when the runtime cannot issue a new code on demand (passive mode). */
+  readonly refreshable?: boolean;
+  /** How the runtime obtains login codes, for operator hints. */
+  readonly loginMode?: 'active' | 'passive' | 'unknown';
+  /** Why no scannable code is available, shown verbatim by the console. */
+  readonly hint?: string;
 }
 
 /** Everything a driver may do. Optional methods map 1:1 to OneBot actions. */
