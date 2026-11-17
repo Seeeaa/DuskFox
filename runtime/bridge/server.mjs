@@ -249,6 +249,7 @@ export function createBridgeServer(options) {
         send_segments: sendSegments,
         recv_segments: recvSegments,
         features,
+        ...(typeof kernel.diagnostics === 'function' ? { native_probe: kernel.diagnostics() } : {}),
         ...(Array.isArray(kernel.pendingNative) && kernel.pendingNative.length > 0
           ? { pending_native: kernel.pendingNative }
           : {}),
@@ -444,7 +445,7 @@ export function createBridgeServer(options) {
       const a = Buffer.from(supplied);
       const b = Buffer.from(token);
       const authorized = a.length === b.length && crypto.timingSafeEqual(a, b);
-      if (!authorized && !url.pathname.startsWith('/sim/')) {
+      if (!authorized && !(kernel.mode === 'sim' && url.pathname.startsWith('/sim/'))) {
         response.writeHead(401, { 'content-type': 'application/json' });
         response.end(JSON.stringify({ error: 'unauthorized' }));
         return;

@@ -30,6 +30,18 @@ class NativeKernel {
     this.loginService = null;
     this.msgService = null;
     this.listenerReady = false;
+    this.loginListener = null;
+    this.messageListener = null;
+    this.probe = {
+      qrPictures: 0,
+      qrScans: 0,
+      qrSuccesses: 0,
+      loginConnected: 0,
+      sessionCaptured: false,
+      messageServiceSeen: false,
+      msfStatus: null,
+      lastAttachError: '',
+    };
     /** msgId -> Peer，用于按 ID 查询消息与撤回。 */
     this.peerByMsgId = new Map();
     /** uin -> uid，来自好友列表；私聊发送必须用 uid。 */
@@ -87,12 +99,17 @@ class NativeKernel {
     return { uin: this.online ? this.uin : '', nick: this.nick, avatar: this.avatar, online: this.online };
   }
 
+  diagnostics() {
+    return { ...this.probe, loginListenerReady: this.listenerReady, messageListenerReady: Boolean(this.messageListener) };
+  }
+
   /**
    * 直接 require wrapper.node 注册登录监听：不再依赖 dlopen 观测门控。
    * 【待实机验证】如果 QQ 尚未加载 wrapper.node，require 会抛错，这里退避重试。
    */
   attach() {
     if (this.listenerReady) return;
+    if (this.options.wrapperObserved && !this.options.wrapperObserved()) return;
     let native;
     try {
       native = require('./wrapper.node');
@@ -109,14 +126,17 @@ class NativeKernel {
             if (typeof data !== 'string') return;
             const base64 = data.replace(/^data:image\/png;base64,/, '');
             if (!/^[A-Za-z0-9+/=]+$/.test(base64)) return;
+            self.probe.qrPictures += 1;
             self.qrSeq += 1;
             self.qr = { picture: base64, seq: self.qrSeq, expiresAt: Date.now() + 120_000 };
             self.qrState = 'waiting';
           },
           onQRCodeSessionUserScaned() {
+            self.probe.qrScans += 1;
             self.qrState = 'scanned';
           },
           onQRCodeLoginSucceed(result) {
+            self.probe.qrSuccesses += 1;
             const uin = String((result && result.uin) || '');
             if (/^\d+$/.test(uin)) self.uin = uin;
             self.qrState = 'confirmed';
@@ -131,7 +151,7 @@ class NativeKernel {
           onLoginFailed() {
             if (!self.online) self.qrState = 'expired';
           },
-          onLoginConnected() {},
+          onLoginConnected() { self.probe.loginConnected += 1; },
           onLoginDisConnected() {},
         },
         {
@@ -143,8 +163,10 @@ class NativeKernel {
         },
       );
       this.loginService.addKernelLoginListener(listener);
+      this.loginListener = listener;
       this.listenerReady = true;
     } catch (error) {
+      this.probe.lastAttachError = String(error?.name || 'Error');
       // 登录服务尚未可用：保持未就绪，下一轮重试。
     }
   }
@@ -175,27 +197,41 @@ class NativeKernel {
       const wrapper = require('./wrapper.node');
       const type = wrapper.NodeIQQNTWrapperSession;
       if (!type) return;
-      const session =
-        typeof type.getNTWrapperSession === 'function' ? type.getNTWrapperSession('nt_1') : null;
+      const session = this.options.sessionProvider?.() ||
+        (typeof type.getNTWrapperSession === 'function' ? type.getNTWrapperSession('nt_1') : null);
+      this.probe.sessionCaptured = Boolean(session);
       if (!session || typeof session.getMsgService !== 'function') return;
       this.session = session;
-      this.msgService = session.getMsgService();
+      const candidate = session.getMsgService();
+      this.probe.messageServiceSeen = Boolean(candidate);
+      if (!candidate) return;
       const self = this;
-      this.msgService.addKernelMsgListener({
+      const listener = new Proxy({
         onRecvMsg(messages) {
           if (!Array.isArray(messages)) return;
           for (const message of messages) self.onNativeMessage(message);
         },
+      }, {
+        get(target, key) {
+          if (key in target) return target[key];
+          if (typeof key === 'string' && key.startsWith('on')) return () => {};
+          return undefined;
+        },
       });
+      candidate.addKernelMsgListener(listener);
+      this.msgService = candidate;
+      this.messageListener = listener;
       this.attachRequestListeners(session);
       this.online = true;
       try {
         const msf = this.loginService && this.loginService.getMsfStatus();
+        this.probe.msfStatus = typeof msf === 'number' ? msf : null;
         if (typeof msf === 'number' && msf !== 2) this.online = false;
       } catch (error) {
         // 【待实机验证】getMsfStatus 语义；拿不到时按在线处理已有会话。
       }
     } catch (error) {
+      this.probe.lastAttachError = String(error?.name || 'Error');
       // 会话尚未建立：下一轮重试。
     }
   }
