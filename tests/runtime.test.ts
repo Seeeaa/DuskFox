@@ -231,3 +231,63 @@ test('密码登录：控制台 -> 运行时（能力由 features 决定，错误
     await runtime.close();
   }
 });
+
+/**
+ * P0-1 回归：request 事件曾在 bridge 入口被过滤掉，好友/加群申请永远到不了 OneBot，
+ * 而 features.requestHandle 仍是 true。这里走"模拟内核 emit → /api/events → 处理动作回到运行时"整条路。
+ */
+test('请求事件：好友/加群申请经 bridge 入口进入 /api/events，并被处理动作送回运行时', async () => {
+  const { runtime, instance } = await bootPair();
+  try {
+    const friendFlag = runtime.kernel.request({ kind: 'friend', userId: '20009', comment: '我是好友申请' });
+    const groupFlag = runtime.kernel.request({
+      kind: 'group',
+      groupId: '30001',
+      userId: '20010',
+      comment: '我想加群',
+      subType: 'add',
+    });
+
+    await waitFor(async () => {
+      const events = await instance.call('GET', '/api/events');
+      const types = events.json.items.map((item: { type: string }) => item.type);
+      return types.includes('request.friend') && types.includes('request.group');
+    }, 8000);
+
+    const events = await instance.call('GET', '/api/events');
+    const friend = events.json.items.find((item: { type: string }) => item.type === 'request.friend');
+    const group = events.json.items.find((item: { type: string }) => item.type === 'request.group');
+    assert.ok(friend, '好友申请没有出现在控制台事件里');
+    assert.match(String(friend.summary), /我是好友申请/);
+    assert.ok(group, '加群申请没有出现在控制台事件里');
+    assert.match(String(group.summary), /我想加群/);
+
+    // 能力声明必须与实际通路一致：能处理请求，就必须真的收得到请求事件。
+    const status = await instance.call('GET', '/api/status');
+    const caps = Object.fromEntries(
+      status.json.capabilities.map((row: { key: string; state: string }) => [row.key, row.state]),
+    );
+    assert.equal(caps.requests, 'yes');
+
+    const approve = await instance.call('POST', '/api/action/set_friend_add_request', { flag: friendFlag, approve: true });
+    assert.equal(approve.json.status, 'ok');
+    const handledFriend = runtime.kernel.requests.at(-1);
+    assert.equal(handledFriend?.flag, friendFlag);
+    assert.equal(handledFriend?.type, 'friend');
+
+    const reject = await instance.call('POST', '/api/action/set_group_add_request', {
+      flag: groupFlag,
+      sub_type: 'invite',
+      approve: false,
+    });
+    assert.equal(reject.json.status, 'ok');
+    const handledGroup = runtime.kernel.requests.at(-1);
+    assert.equal(handledGroup?.flag, groupFlag);
+    assert.equal(handledGroup?.type, 'group');
+    assert.equal(handledGroup?.subType, 'invite');
+    assert.equal(handledGroup?.approve, false);
+  } finally {
+    await instance.stop();
+    await runtime.close();
+  }
+});

@@ -15,6 +15,16 @@ export class SimKernel {
   stop(): Promise<void>;
   status(): { uin: string; nick: string; avatar: string; online: boolean };
   incoming(input: Record<string, unknown>): void;
+  /** Push a friend/group request the way the native kernel does; returns its flag. */
+  request(input?: {
+    kind?: 'friend' | 'group';
+    userId?: string;
+    groupId?: string;
+    comment?: string;
+    subType?: 'add' | 'invite';
+    flag?: string;
+    time?: number;
+  }): string;
   issueQr(ttlMs?: number): boolean;
   currentQr(): { picture: string | null; seq: number; expiresAt: number; expired: boolean } | null;
   requestQr(): Promise<boolean>;
