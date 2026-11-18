@@ -1,6 +1,6 @@
 # DuskFox
 
-QQ 到 OneBot v11 的连接器，附带 Web 控制台。`v1.0.0` 供 Linux Docker 内测。
+QQ 到 OneBot v11 的连接器，附带 Web 控制台。`v1.0.1` 供 Linux Docker 内测。
 
 仓库可以运行模拟账号，用来查看界面和联调 OneBot。Linux Docker 安装会从 QQ 官方地址下载固定版本客户端，在独立容器中启动原生桥接，供专用测试账号扫码接入。
 

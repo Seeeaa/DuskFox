@@ -647,8 +647,8 @@ var S={demo:'normal',stat:{rx:0,tx:0,conn:0,epm:0},
  qr:{state:'none',seq:0},cwd:'/',sel:null,startedAt:Date.now(),login:{qr:false,quick:false,password:false}};
 
 var EV=[],LG=[],subs=[];
-var DF=window.duskfox={signal:{rxp:0,txp:0,vals:[],rx:[],tx:[],tick:0,push:function(n,k){if(k==='tx')DF.signal.txp+=n;else DF.signal.rxp+=n}}};
-(function(){var s=DF.signal;for(var i=0;i<400;i++){s.rx.push(0);s.tx.push(0);s.vals.push(0)}s.tick=performance.now()})();
+var DF=window.duskfox={signal:{rxp:0,txp:0,vals:[],rx:[],tx:[],push:function(n,k){if(k==='tx')DF.signal.txp+=n;else DF.signal.rxp+=n}}};
+(function(){var s=DF.signal;for(var i=0;i<400;i++){s.rx.push(0);s.tx.push(0);s.vals.push(0)}})();
 
 /* ---- 会话令牌（仅存 sessionStorage） ---- */
 var MEM_TOKEN='';
@@ -783,16 +783,15 @@ async function connectStream(){
 
 /* ---- 轮询兜底 + 信号带 ---- */
 function refreshSignal(){
-  var signal=DF.signal,now=Date.now(),total=0;
+  var signal=DF.signal,second=Math.floor(Date.now()/1000),total=0;
   signal.vals.fill(0,0,60);
   for(var i=0;i<LG.length;i++){
-    var age=now-LG[i].ts;
-    if(age>=0&&age<300000){signal.vals[Math.floor(age/5000)]++;total++}
+    var age=second-Math.floor(LG[i].ts/1000);
+    if(age>=0&&age<60){signal.vals[age]++;total++}
   }
   var count=$('#sgtotal');if(count)count.textContent=total+' 条';
-  signal.tick=performance.now();
 }
-setInterval(refreshSignal,1000);
+setInterval(refreshSignal,250);
 setInterval(function(){
   if(!tok())return;
   loadStatus().then(function(){
@@ -1233,7 +1232,7 @@ P.overview={n:'概览',r:function(){
  '<div class="sec"><h2>运行状态 '+SRC(API.status)+'</h2>'+gate(function(){
   return '<div class="hero"><div><div class="st-big">'+(a.online?'已连接':a.state==='logging'?'已授权':'未登录')+'</div>'+
    '<div class="lab">'+(a.online?('账号 '+a.uin+' · '+E(a.nick)+' · 在线 <span id="up">'+uptime()+'</span>'):('等待账号登录 · 驱动 '+E(drv.name||'—')))+'</div></div></div>'+
-    '<div class="sig"><div class="sh"><span class="sgs"><button data-sg="vals" class="on">日志</button></span><span class="src">近 5 分钟 · 每 5 秒日志条数 · <span id="sgtotal">0 条</span></span></div><div class="sgw"><canvas class="wv big" data-rows="7" data-series="vals" aria-hidden="true"></canvas><div class="sgt" id="sgt"></div></div></div></div>'+
+    '<div class="sig"><div class="sh"><span class="sgs"><button data-sg="vals" class="on">日志</button></span><span class="src">近 60 秒 · 每秒日志条数 · <span id="sgtotal">0 条</span></span></div><div class="sgw"><canvas class="wv big" data-rows="7" data-series="vals" aria-hidden="true"></canvas><div class="sgt" id="sgt"></div></div></div></div>'+
    '<div class="grid tiles">'+[['rx','收到消息',S.stat.rx],['tx','发出消息',S.stat.tx],['','活动连接',S.stat.conn],['','事件 / 分钟（含通知/心跳）',S.stat.epm]].map(function(x){return '<div class="tile"><div class="lab">'+x[1]+'</div><div class="num"'+(x[0]?' data-c="'+x[0]+'"':'')+'>'+x[2]+'</div></div>'}).join('')+'</div>';
  })+'</div>'+
  '<div class="sec"><h2>能力范围</h2><div class="list">'+(S.caps.length?S.caps.map(function(c){
@@ -1250,15 +1249,15 @@ function recent(){return '<div class="evl">'+EV.slice(0,6).map(function(e){retur
 
 /* ====== 信号带：数据驱动。接线：duskfox.signal.push(n,'rx'|'tx') 每秒累加，或直接写 duskfox.signal.vals/rx/tx（下标 0 为最新一秒） ====== */
 var WV={raf:0,cvs:[],last:0},REDUCE=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
-function wvFrac(){return Math.min(1,(performance.now()-DF.signal.tick)/5000)}
+function wvFrac(){return (Date.now()%1000)/1000}
 function wvSetup(){WV.cvs=$$('.wv').map(function(cv){var dp=Math.min(window.devicePixelRatio||1,2),w=cv.clientWidth,rows=+cv.dataset.rows,sp=10,h=rows*sp;cv.style.height=h+'px';cv.width=Math.max(1,w*dp);cv.height=h*dp;cv._o={w:w,h:h,dp:dp,rows:rows,sp:sp};var n=$('#sgn');if(n)n.textContent=Math.floor(w/sp);var tip=cv.parentNode.querySelector('.sgt');
-  cv.onmousemove=function(e){var r=cv.getBoundingClientRect(),i=Math.floor((e.clientX-r.left)/sp-wvFrac());cv._h=i;var v=(DF.signal[cv.dataset.series||'vals'][i]||0);if(tip){tip.textContent=v+' 条 · '+(i*5)+'–'+((i+1)*5)+' 秒前';tip.style.left=Math.max(0,Math.min(e.clientX-r.left,r.width-110))+'px';tip.style.display='block'}};
+  cv.onmousemove=function(e){var r=cv.getBoundingClientRect(),i=Math.floor((e.clientX-r.left)/sp-wvFrac());cv._h=i;var v=(DF.signal[cv.dataset.series||'vals'][i]||0);if(tip){tip.textContent=v+' 条 · '+i+'–'+(i+1)+' 秒前';tip.style.left=Math.max(0,Math.min(e.clientX-r.left,r.width-110))+'px';tip.style.display='block'}};
  cv.onmouseleave=function(){cv._h=null;if(tip)tip.style.display='none'};return cv});
  $$('[data-sg]').forEach(function(b){b.onclick=function(){$$('[data-sg]').forEach(function(x){x.classList.toggle('on',x===b)});WV.cvs.forEach(function(c){c.dataset.series=b.dataset.sg})}})}
 function wvFrame(now){WV.raf=0;if(!WV.cvs.length||!document.body.contains(WV.cvs[0]))return;var still=REDUCE||SET.motion==='off';
  if(!still)WV.raf=requestAnimationFrame(wvFrame);if(!still&&now-WV.last<32)return;WV.last=now;
  var ink=getComputedStyle(document.body).color,frac=still?0:wvFrac();
- WV.cvs.forEach(function(cv){var o=cv._o,c=cv.getContext('2d'),arr=DF.signal[cv.dataset.series||'vals'];if(!o||!o.w)return;c.setTransform(o.dp,0,0,o.dp,0,0);c.clearRect(0,0,o.w,o.h);var cols=Math.floor(o.w/o.sp)+1,cy=(o.rows-1)/2,mx=6;
+  WV.cvs.forEach(function(cv){var o=cv._o,c=cv.getContext('2d'),arr=DF.signal[cv.dataset.series||'vals'];if(!o||!o.w)return;c.setTransform(o.dp,0,0,o.dp,0,0);c.clearRect(0,0,o.w,o.h);var cols=Math.floor(o.w/o.sp)+1,cy=(o.rows-1)/2,mx=2;
   for(var i=0;i<cols;i++)if((arr[i]||0)>mx)mx=arr[i];
   for(var i=0;i<cols;i++){var v=arr[i]||0,x=(i+frac)*o.sp+o.sp/2,half=Math.min(1,v/mx)*(o.rows/2+.3),hot=i<9||i===cv._h;
    for(var r=0;r<o.rows;r++){var dy=Math.abs(r-cy),on=dy<=half;c.fillStyle=on&&hot?'#df7f43':ink;c.globalAlpha=on?(hot?(i===cv._h?1:1-i/10):.9-dy/o.rows*.6):.13;var sz=on?2.8:1.2;c.fillRect(x-sz/2,r*o.sp+o.sp/2-sz/2,sz,sz)}}
