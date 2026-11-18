@@ -647,7 +647,7 @@ var S={demo:'normal',stat:{rx:0,tx:0,conn:0,epm:0},
  qr:{state:'none',seq:0},cwd:'/',sel:null,startedAt:Date.now(),login:{qr:false,quick:false,password:false}};
 
 var EV=[],LG=[],subs=[];
-var DF=window.duskfox={signal:{rxp:0,txp:0,vals:[],rx:[],tx:[],push:function(n,k){if(k==='tx')DF.signal.txp+=n;else DF.signal.rxp+=n}}};
+var DF=window.duskfox={signal:{rxp:0,txp:0,vals:[],rx:[],tx:[],second:0,tick:0,push:function(n,k){if(k==='tx')DF.signal.txp+=n;else DF.signal.rxp+=n}}};
 (function(){var s=DF.signal;for(var i=0;i<400;i++){s.rx.push(0);s.tx.push(0);s.vals.push(0)}})();
 
 /* ---- 会话令牌（仅存 sessionStorage） ---- */
@@ -784,6 +784,7 @@ async function connectStream(){
 /* ---- 轮询兜底 + 信号带 ---- */
 function refreshSignal(){
   var signal=DF.signal,second=Math.floor(Date.now()/1000),total=0;
+  if(signal.second!==second){signal.second=second;signal.tick=performance.now()}
   signal.vals.fill(0,0,60);
   for(var i=0;i<LG.length;i++){
     var age=second-Math.floor(LG[i].ts/1000);
@@ -1249,7 +1250,7 @@ function recent(){return '<div class="evl">'+EV.slice(0,6).map(function(e){retur
 
 /* ====== 信号带：数据驱动。接线：duskfox.signal.push(n,'rx'|'tx') 每秒累加，或直接写 duskfox.signal.vals/rx/tx（下标 0 为最新一秒） ====== */
 var WV={raf:0,cvs:[],last:0},REDUCE=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
-function wvFrac(){return (Date.now()%1000)/1000}
+function wvFrac(){return Math.min(1,(performance.now()-DF.signal.tick)/1000)}
 function wvSetup(){WV.cvs=$$('.wv').map(function(cv){var dp=Math.min(window.devicePixelRatio||1,2),w=cv.clientWidth,rows=+cv.dataset.rows,sp=10,h=rows*sp;cv.style.height=h+'px';cv.width=Math.max(1,w*dp);cv.height=h*dp;cv._o={w:w,h:h,dp:dp,rows:rows,sp:sp};var n=$('#sgn');if(n)n.textContent=Math.floor(w/sp);var tip=cv.parentNode.querySelector('.sgt');
   cv.onmousemove=function(e){var r=cv.getBoundingClientRect(),i=Math.floor((e.clientX-r.left)/sp-wvFrac());cv._h=i;var v=(DF.signal[cv.dataset.series||'vals'][i]||0);if(tip){tip.textContent=v+' 条 · '+i+'–'+(i+1)+' 秒前';tip.style.left=Math.max(0,Math.min(e.clientX-r.left,r.width-110))+'px';tip.style.display='block'}};
  cv.onmouseleave=function(){cv._h=null;if(tip)tip.style.display='none'};return cv});
@@ -1258,8 +1259,9 @@ function wvFrame(now){WV.raf=0;if(!WV.cvs.length||!document.body.contains(WV.cvs
  if(!still)WV.raf=requestAnimationFrame(wvFrame);if(!still&&now-WV.last<32)return;WV.last=now;
  var ink=getComputedStyle(document.body).color,frac=still?0:wvFrac();
   WV.cvs.forEach(function(cv){var o=cv._o,c=cv.getContext('2d'),arr=DF.signal[cv.dataset.series||'vals'];if(!o||!o.w)return;c.setTransform(o.dp,0,0,o.dp,0,0);c.clearRect(0,0,o.w,o.h);var cols=Math.floor(o.w/o.sp)+1,cy=(o.rows-1)/2,mx=2;
-  for(var i=0;i<cols;i++)if((arr[i]||0)>mx)mx=arr[i];
-  for(var i=0;i<cols;i++){var v=arr[i]||0,x=(i+frac)*o.sp+o.sp/2,half=Math.min(1,v/mx)*(o.rows/2+.3),hot=i<9||i===cv._h;
+   for(var i=0;i<cols;i++)if((arr[i]||0)>mx)mx=arr[i];
+   o.scale=o.scale===undefined?mx:o.scale+(mx-o.scale)*.12;
+   for(var i=0;i<cols;i++){var v=arr[i]||0,x=Math.round(((i+frac)*o.sp+o.sp/2)*o.dp)/o.dp,half=Math.min(1,v/o.scale)*(o.rows/2+.3),hot=i<9||i===cv._h;
    for(var r=0;r<o.rows;r++){var dy=Math.abs(r-cy),on=dy<=half;c.fillStyle=on&&hot?'#df7f43':ink;c.globalAlpha=on?(hot?(i===cv._h?1:1-i/10):.9-dy/o.rows*.6):.13;var sz=on?2.8:1.2;c.fillRect(x-sz/2,r*o.sp+o.sp/2-sz/2,sz,sz)}}
   if(cv._h!=null){c.globalAlpha=.55;c.fillStyle='#df7f43';c.fillRect((cv._h+frac)*o.sp+o.sp/2-.5,0,1,o.h)}
   c.globalAlpha=1})}
