@@ -12,7 +12,9 @@
 const ELEMENT_TEXT = 1;
 const ELEMENT_PIC = 2;
 /** 语音元素（QQ NT ElementType.PTT = 4，与 NapCat 的 ElementType 枚举一致）。 */
+const ELEMENT_FILE = 3;
 const ELEMENT_PTT = 4;
+const ELEMENT_VIDEO = 5;
 /** pttElement 需要一段固定波形占位；QQ 只把它当展示数据。取自 NapCat 的实测定值。 */
 const SILK_WAVE = [0, 18, 9, 23, 4, 12, 7, 15, 3, 20, 11, 6, 17, 8, 13];
 /** 引用回复的元素类型（QQ NT ElementType.REPLY）。 */
@@ -116,11 +118,17 @@ class NativeKernel {
       'text',
       ...(mediaSend ? ['image'] : []),
       ...(recordSend ? ['record'] : []),
+      // 文件/视频走与图片相同的 RichMedia 复制路径，代码已实现；
+      // 客户端不提供 getRichMediaFilePathForGuild 时发送会明确报错。
+      'file',
+      'video',
       'at',
       'reply',
     ];
-    /** 能解析进来的段：语音在 onRecvMsg 里由 pttElement 归一化。 */
-    this.recvSegments = ['text', 'image', 'face', 'at', 'reply', 'record'];
+    /** 能解析进来的段：ptt/file/video/multiForward 在 onRecvMsg 里归一化。 */
+    this.recvSegments = ['text', 'image', 'face', 'at', 'reply', 'record', 'file', 'video', 'forward'];
+    /** 能按消息 id 取回字节的媒体类型。 */
+    this.downloadSegments = ['image', 'record', 'file', 'video'];
     /** 密码登录默认关闭，需显式开启（参数与回调仍待实机验证）。 */
     // 默认启用密码登录；显式设置 QQ_BRIDGE_PASSWORD_LOGIN=0 可关闭。
     this.passwordLoginEnabled = process.env.QQ_BRIDGE_PASSWORD_LOGIN !== '0';
@@ -1059,6 +1067,30 @@ class NativeKernel {
   }
 
   /**
+   * 展开合并转发：MsgApi.getMultiMsg(parentMsgPeer, parentMsgId, msgId) → msgList。
+   * 参数取 NapCat getMultiMessages 的用法：parentMsgIdList[0] 是最外层转发 id。
+   * 【待实机验证】getMultiMsg 的返回结构（msgList）与私聊/群聊的 peer 差异。
+   */
+  async getForward(msgId) {
+    const service = this.msgService;
+    if (!service || typeof service.getMultiMsg !== 'function') {
+      throw new Error('客户端未提供 getMultiMsg，合并转发展开待实机验证');
+    }
+    const key = String(msgId ?? '');
+    const owner = (await this.getMessage(key).catch(() => null)) || {};
+    const peer = owner.parentMsgPeer || {
+      chatType: Number(owner.chatType ?? CHAT_PRIVATE),
+      guildId: '',
+      peerUid: String(owner.peerUid ?? ''),
+    };
+    const outermost = String((Array.isArray(owner.parentMsgIdList) && owner.parentMsgIdList[0]) || key);
+    const raw = await withTimeout(service.getMultiMsg(peer, outermost, key), 5000, 'getMultiMsg');
+    const list = raw && (raw.msgList || raw.messages || raw);
+    if (!Array.isArray(list) || list.length === 0) return null;
+    return list;
+  }
+
+  /**
    * 媒体下载完成回调：记下客户端落盘的路径，get_record 才能读到真实文件。
    * 【待实机验证】回调字段名（msgElementId / elementId、msgId、filePath）。
    */
@@ -1287,6 +1319,17 @@ class NativeKernel {
       } else if (segment.type === 'record') {
         // 收到的语音只有 path（QQ 容器内落盘路径），回传时同样要能用。
         elements.push(await this.buildPttElement(String(segment.data?.file ?? segment.data?.path ?? segment.data?.url ?? '')));
+      } else if (segment.type === 'file') {
+        elements.push(await this.buildFileElement(
+          String(segment.data?.file ?? segment.data?.path ?? segment.data?.url ?? ''),
+          String(segment.data?.name ?? segment.data?.file_name ?? ''),
+        ));
+      } else if (segment.type === 'video') {
+        elements.push(await this.buildVideoElement(
+          String(segment.data?.file ?? segment.data?.path ?? segment.data?.url ?? ''),
+          String(segment.data?.file_name ?? segment.data?.name ?? ''),
+          Number(segment.data?.duration ?? 0) || 0,
+        ));
       } else if (segment.type === 'at') {
         elements.push(await this.buildAtElement(segment.data || {}, scene, peerId));
       } else if (segment.type === 'reply') {
@@ -1447,6 +1490,80 @@ class NativeKernel {
         otherBusinessInfo: { aiVoiceType: 0 },
       },
     };
+  }
+
+  /**
+   * 文件发送：FileApi.uploadFile(path, ElementType.FILE) 的等价实现——
+   * md5 + getRichMediaFilePathForGuild + copyFile，再发 fileElement。
+   * 字段取自 NapCat 的 FileElement 定义（fileMd5/fileName/filePath/fileSize）。
+   * 【待实机验证】私聊场景是否同样接受 ForGuild 路径。
+   */
+  async buildFileElement(rawFile, rawName) {
+    const uploaded = await this.uploadForRichMedia(rawFile, ELEMENT_FILE, rawName, '.bin');
+    return {
+      elementType: ELEMENT_FILE,
+      elementId: '',
+      fileElement: {
+        fileName: uploaded.fileName,
+        filePath: uploaded.mediaPath,
+        fileSize: String(uploaded.size),
+        fileMd5: uploaded.md5,
+      },
+    };
+  }
+
+  /**
+   * 视频发送：VideoApi.createValidSendVideoElement 的等价实现。
+   * 字段取自 VideoElement（fileName/filePath/fileSize/videoMd5/fileTime/fileFormat）。
+   * duration 用调用方给的真实值，拿不到就写 0，不编造。
+   * 【待实机验证】fileFormat 是否必须为 2(mp4)、缩略图是否必需。
+   */
+  async buildVideoElement(rawFile, rawName, duration) {
+    const uploaded = await this.uploadForRichMedia(rawFile, ELEMENT_VIDEO, rawName, '.mp4');
+    return {
+      elementType: ELEMENT_VIDEO,
+      elementId: '',
+      videoElement: {
+        fileName: uploaded.fileName,
+        filePath: uploaded.mediaPath,
+        fileSize: String(uploaded.size),
+        videoMd5: uploaded.md5,
+        fileTime: Number(duration) || 0,
+        fileFormat: 2,
+      },
+    };
+  }
+
+  /**
+   * 文件/视频共用的 RichMedia 落盘：算 md5 → 问客户端要路径 → 复制过去。
+   * 与图片/语音走的是同一个 getRichMediaFilePathForGuild 接口。
+   */
+  async uploadForRichMedia(rawFile, elementType, rawName, fallbackExt) {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const crypto = require('node:crypto');
+    const source = await materializeMediaFile(rawFile, fallbackExt);
+    if (!source || !fs.existsSync(source)) throw new Error('文件不存在：' + shortOf(rawFile));
+    const buffer = fs.readFileSync(source);
+    const md5 = crypto.createHash('md5').update(buffer).digest('hex');
+    const fileName = rawName || path.basename(source);
+    const service = this.msgService || (this.session && this.session.getMsgService());
+    if (!service || typeof service.getRichMediaFilePathForGuild !== 'function') {
+      throw new Error('客户端未提供 RichMedia 路径接口，文件/视频发送待实机验证');
+    }
+    const mediaPath = service.getRichMediaFilePathForGuild({
+      md5HexStr: md5,
+      fileName,
+      elementType,
+      elementSubType: 0,
+      thumbSize: 0,
+      needCreate: true,
+      downloadType: 1,
+      file_uuid: '',
+    });
+    fs.mkdirSync(path.dirname(mediaPath), { recursive: true });
+    fs.copyFileSync(source, mediaPath);
+    return { md5, fileName, mediaPath, size: buffer.length };
   }
 
   /**
@@ -1975,6 +2092,34 @@ async function materializeImage(raw) {
   const buffer = Buffer.from(cleaned, 'base64');
   if (buffer.length === 0) throw new Error('图片 base64 解码失败：' + shortOf(cleaned));
   return saveMediaBuffer(buffer);
+}
+
+/**
+ * 文件/视频素材落地：本地路径、file://、base64://、data: 四种形态。
+ * http(s) 暂不支持——发文件要先有本地字节，避免把远端内容当可信输入。
+ */
+async function materializeMediaFile(raw, fallbackExt = '.bin') {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const value = String(raw ?? '').trim();
+  if (!value) return '';
+  if (/^https?:\/\//i.test(value)) {
+    throw new Error('暂不支持从 URL 直接发送文件/视频，请给本地路径或 base64:// 载荷');
+  }
+  if (value.startsWith('file://')) return decodeURIComponent(value.slice('file://'.length));
+  if (!value.startsWith('base64://') && !(value.startsWith('data:') && value.includes(';base64,'))) return value;
+  const payload = value.startsWith('base64://')
+    ? value.slice('base64://'.length)
+    : value.slice(value.indexOf(';base64,') + ';base64,'.length);
+  const cleaned = payload.replace(/\s+/g, '');
+  if (!cleaned) throw new Error('文件 base64 数据为空');
+  const buffer = Buffer.from(cleaned, 'base64');
+  if (buffer.length === 0) throw new Error('文件 base64 解码失败：' + shortOf(cleaned));
+  const dir = mediaTmpDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const target = path.join(dir, 'media-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + fallbackExt);
+  fs.writeFileSync(target, buffer);
+  return target;
 }
 
 /**

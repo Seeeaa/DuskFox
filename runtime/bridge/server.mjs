@@ -641,7 +641,18 @@ export function createBridgeServer(options) {
       try {
         const nodes = await kernel.getForward(String(url.searchParams.get('message_id') ?? ''));
         if (!nodes) return send(404, { error: '合并转发不存在或已失效' });
-        return send(200, { content: nodes });
+        // 原生给的是 RawMessage，这里统一转成 OneBot 节点；已是 OneBot 形状的原样放行。
+        const content = nodes.map((node) => {
+          if (node && Array.isArray(node.message)) return node;
+          const parsed = normalizeMessage(node);
+          return {
+            user_id: Number(parsed.sender && parsed.sender.user_id) || 0,
+            nickname: String((parsed.sender && parsed.sender.nickname) || ''),
+            time: Number(parsed.time) || 0,
+            message: parsed.message,
+          };
+        });
+        return send(200, { content });
       } catch (error) {
         return send(404, { error: error instanceof Error ? error.message : String(error) });
       }
