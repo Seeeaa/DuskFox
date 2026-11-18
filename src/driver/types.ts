@@ -233,7 +233,9 @@ export interface AccountDriver {
    * Download the media attached to a message as base64 (used by `get_record`).
    * Returns null when the runtime has no bytes for that message.
    */
-  fetchMedia?(nativeId: string, kind: 'image' | 'record'): Promise<MediaPayload | null>;
+  fetchMedia?(nativeId: string, kind: 'image' | 'record' | 'file' | 'video'): Promise<MediaPayload | null>;
+  /** Expand a merged-forward message by its native id (OneBot get_forward_msg). */
+  fetchForward?(nativeId: string): Promise<unknown[] | null>;
   recall(messageId: string): Promise<void>;
   friendList(): Promise<Friend[]>;
   groupList(): Promise<Group[]>;

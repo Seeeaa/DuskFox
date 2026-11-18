@@ -45,6 +45,9 @@ export class SimKernel {
   groupMembers(groupId: string): Promise<unknown[]>;
   handleRequest(input: { flag: string; approve: boolean; type: string; subType?: string }): Promise<boolean>;
   media(msgId: string, kind?: string): Promise<{ base64: string; name: string; size: number }>;
+  getForward(msgId: string): Promise<unknown[] | null>;
+  /** 能按消息 id 取回字节的媒体类型（/api/media 的后端）。 */
+  downloadSegments: string[];
   getMessage(msgId: string): Promise<unknown>;
 }
 
@@ -52,4 +55,7 @@ export function createSimKernelFromEnv(): SimKernel;
 export const TINY_PNG: Buffer;
 /** 语音的模拟音频字节（AMR 头 + 静音），供 get_record 的离线闭环使用。 */
 export const TINY_AMR: Buffer;
+/** 文件/视频的模拟字节，供 get_file / get_video 的离线闭环校验。 */
+export const TINY_FILE: Buffer;
+export const TINY_VIDEO: Buffer;
 export function pngDataUrl(): string;

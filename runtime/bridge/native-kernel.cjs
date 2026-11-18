@@ -1036,9 +1036,11 @@ class NativeKernel {
     const path = require('node:path');
     const msg = await this.getMessage(String(msgId));
     if (!msg || !Array.isArray(msg.elements)) throw new Error('消息不存在或不可读');
-    const key = kind === 'record' ? 'pttElement' : 'picElement';
+    const keyOf = { record: 'pttElement', image: 'picElement', file: 'fileElement', video: 'videoElement' };
+    const labelOf = { record: '语音', image: '图片', file: '文件', video: '视频' };
+    const key = keyOf[kind] || 'picElement';
     const element = msg.elements.map((item) => item && item[key]).find(Boolean);
-    if (!element) throw new Error('该消息不包含' + (kind === 'record' ? '语音' : '图片'));
+    if (!element) throw new Error('该消息不包含' + (labelOf[kind] || '图片'));
     // 收到的语音 filePath 常常是空串：先让客户端把 RichMedia 下载到本地，
     // 结果通过 onRichMediaDownloadComplete 回来（与 NapCat 的 downloadMedia 同一条链路）。
     const candidates = [element.filePath, element.sourcePath]

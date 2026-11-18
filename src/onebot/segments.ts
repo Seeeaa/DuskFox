@@ -72,11 +72,16 @@ export function toOb11Segment(segment: Segment): Ob11Segment {
     case 'video': {
       const data: Record<string, unknown> = { file: segment.file };
       if (segment.url) data.url = segment.url;
+      if (segment.path) data.path = segment.path;
+      if (segment.name) data.file_name = segment.name;
+      if (segment.size !== undefined) data.file_size = segment.size;
+      if (segment.duration !== undefined) data.duration = segment.duration;
       return { type: 'video', data };
     }
     case 'file': {
       const data: Record<string, unknown> = { file: segment.file };
       if (segment.name) data.name = segment.name;
+      if (segment.path) data.path = segment.path;
       if (segment.size !== undefined) data.file_size = segment.size;
       if (segment.url) data.url = segment.url;
       return { type: 'file', data };
@@ -128,12 +133,21 @@ export function fromOb11Segment(segment: Ob11Segment): Segment {
         ...(data.file_size !== undefined ? { size: Number(data.file_size) } : {}),
       };
     case 'video':
-      return { type: 'video', file: String(data.file ?? data.url ?? ''), ...(data.url ? { url: String(data.url) } : {}) };
+      return {
+        type: 'video',
+        file: String(data.file ?? data.url ?? ''),
+        ...(data.url ? { url: String(data.url) } : {}),
+        ...(data.path ? { path: String(data.path) } : {}),
+        ...(data.file_name ? { name: String(data.file_name) } : {}),
+        ...(data.file_size !== undefined ? { size: Number(data.file_size) } : {}),
+        ...(data.duration !== undefined ? { duration: Number(data.duration) } : {}),
+      };
     case 'file':
       return {
         type: 'file',
         file: String(data.file ?? data.url ?? ''),
         ...(data.name ? { name: String(data.name) } : {}),
+        ...(data.path ? { path: String(data.path) } : {}),
         ...(data.file_size !== undefined ? { size: Number(data.file_size) } : {}),
         ...(data.url ? { url: String(data.url) } : {}),
       };
@@ -141,8 +155,26 @@ export function fromOb11Segment(segment: Ob11Segment): Segment {
       return { type: 'json', data: typeof data.data === 'string' ? data.data : JSON.stringify(data.data ?? {}) };
     case 'markdown':
       return { type: 'markdown', content: String(data.content ?? data.data ?? '') };
-    case 'forward':
-      return { type: 'forward', id: String(data.id ?? '') };
+    case 'forward': {
+      // 合并转发：只有 id 时靠 get_forward_msg 展开；带 content 时直接带上节点。
+      const content = Array.isArray(data.content)
+        ? data.content.map((node) => {
+            const item = (node ?? {}) as Record<string, unknown>;
+            const raw = item.message ?? item.content ?? item.data;
+            return {
+              userId: String(item.user_id ?? item.uin ?? ''),
+              ...(item.nickname || item.name ? { nickname: String(item.nickname ?? item.name) } : {}),
+              time: Number(item.time ?? 0) || 0,
+              segments: Array.isArray(raw) ? raw.map((segment) => fromOb11Segment(segment as Ob11Segment)) : [],
+            };
+          })
+        : undefined;
+      return {
+        type: 'forward',
+        id: String(data.id ?? ''),
+        ...(content && content.length > 0 ? { content } : {}),
+      };
+    }
     default:
       if (OB11_TO_INTERNAL.has(type)) return { type: 'text', text: '' };
       return { type: 'unknown', kind: type, raw: segment };

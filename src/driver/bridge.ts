@@ -705,12 +705,12 @@ export class BridgeDriver implements AccountDriver {
    * local RichMedia file answer 501/404, which is reported as "no bytes" so the
    * action can fail honestly instead of returning empty audio.
    */
-  async fetchMedia(nativeId: string, kind: 'image' | 'record'): Promise<MediaPayload | null> {
+  async fetchMedia(nativeId: string, kind: 'image' | 'record' | 'file' | 'video'): Promise<MediaPayload | null> {
     if (this.#contract < 2) return null;
     if (!nativeId) return null;
     try {
       const data = await this.#request<{ base64?: string; name?: string; size?: number }>(
-        `/api/media?message_id=${encodeURIComponent(nativeId)}&kind=${kind === 'record' ? 'record' : 'image'}`,
+        `/api/media?message_id=${encodeURIComponent(nativeId)}&kind=${kind}`,
       );
       const base64 = String(data.base64 ?? '');
       if (!base64) return null;
@@ -719,6 +719,26 @@ export class BridgeDriver implements AccountDriver {
       const message = error instanceof Error ? error.message : String(error);
       // 409 = 消息在、字节还没落盘，可重试；用专用标记让动作层报 1405 而不是"消息不存在"。
       if (message.includes('HTTP 409')) throw new Error('MEDIA_NOT_READY: ' + message);
+      if (message.includes('HTTP 404') || message.includes('HTTP 501')) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * 展开合并转发：运行时把节点归一化成 OneBot 段数组，这里再转成内部段。
+   * 运行时未实现（501）时返回 null，由动作层报"暂不支持"而不是给空节点。
+   */
+  async fetchForward(nativeId: string): Promise<unknown[] | null> {
+    if (this.#contract < 2) return null;
+    if (!nativeId) return null;
+    try {
+      const data = await this.#request<{ content?: unknown[] }>(
+        `/api/forward?message_id=${encodeURIComponent(nativeId)}`,
+      );
+      if (!data || !Array.isArray(data.content)) return null;
+      return data.content;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       if (message.includes('HTTP 404') || message.includes('HTTP 501')) return null;
       throw error;
     }
