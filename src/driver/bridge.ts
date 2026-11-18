@@ -310,13 +310,18 @@ export class BridgeDriver implements AccountDriver {
     // Contract v2 accepts any segment list; v1 only understands private text.
     if (this.#contract >= 2 || this.capabilities.groupMessage || !plain || message.scene === 'group') {
       try {
-        const sent = await this.#request<{ message_id?: string | number }>('/api/send', 'POST', {
+        const sent = await this.#request<{ message_id?: string | number; unknown?: boolean; error?: string }>('/api/send', 'POST', {
           scene: message.scene,
           peer_id: message.peerId,
           segments: message.segments.map(toWireSegment),
           ...(message.replyTo ? { reply_to: message.replyTo } : {}),
         });
         if (sent?.message_id !== undefined) return { messageId: String(sent.message_id) };
+        // 202 + unknown：消息可能已送达但拿不到回执。必须让上层知道"结果未知"，
+        // 否则框架会把失败当可重试，造成重复发送。
+        if (sent?.unknown) {
+          throw new Error('SEND_RESULT_UNKNOWN: ' + String(sent.error ?? '消息可能已送达但未确认回执'));
+        }
         throw new Error('桥接服务未返回 message_id');
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
