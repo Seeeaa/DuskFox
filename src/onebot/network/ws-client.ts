@@ -5,6 +5,8 @@ import { failedResponse } from '../types.ts';
 import { NetworkAdapter, type ConnectionInfo, type ConnectionStatus } from './base.ts';
 
 const MAX_BACKLOG = 200;
+/** WS 单帧上限：base64 图片可能几 MB。 */
+const MAX_PAYLOAD = 64 * 1024 * 1024;
 
 /** Reverse WebSocket client: the framework dials out to a bot framework. */
 export class WsClientAdapter extends NetworkAdapter {
@@ -86,7 +88,8 @@ export class WsClientAdapter extends NetworkAdapter {
       'User-Agent': 'duskfox',
     };
     if (config.token) headers.authorization = `Bearer ${config.token}`;
-    const socket = new WebSocket(config.url, { headers, handshakeTimeout: 8000, maxPayload: 1024 * 1024, perMessageDeflate: false });
+    // 图片以 base64 通过 WS 下发：一帧常有 2–8 MB，1 MB 上限会让连接被 1009 关闭（实测 pixiv 出图后必断）。
+    const socket = new WebSocket(config.url, { headers, handshakeTimeout: 8000, maxPayload: MAX_PAYLOAD, perMessageDeflate: false });
     this.#socket = socket;
 
     socket.on('open', () => {

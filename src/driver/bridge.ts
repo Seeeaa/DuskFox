@@ -132,6 +132,8 @@ export class BridgeDriver implements AccountDriver {
   #historyFloor = 0;
   /** 账号这次登录的起始时间（毫秒）：运行时长按它算，而不是按页面打开时间。 */
   #onlineSince = 0;
+  /** 上一次状态是否在线：用来在上线瞬间重置历史消息水位。 */
+  #wasOnline = false;
 
   constructor(context: DriverContext, options: DriverOptions) {
     this.#context = context;
@@ -411,8 +413,16 @@ export class BridgeDriver implements AccountDriver {
       if (online) {
         if (bridgeLoginAt > 0) this.#onlineSince = bridgeLoginAt;
         else if (!this.#onlineSince) this.#onlineSince = Date.now();
+        // 刚上线：QQ 会把离线期间积压的群消息一次性推过来，全部当成“历史”，只放行 5 秒内的新消息。
+        // 用驱动启动时间做水位不够——扫码前积压的消息时间晚于启动时间，照样会被当成新指令。
+        if (!this.#wasOnline) {
+          this.#wasOnline = true;
+          this.#historyFloor = Math.floor((Date.now() - 5000) / 1000);
+          this.#context.logger.info('driver:bridge', '账号上线：丢弃上线前的积压消息');
+        }
       } else {
         this.#onlineSince = 0;
+        if (this.#wasOnline) this.#wasOnline = false;
       }
       const next: AccountStatus = {
         uin: authorized || online ? uin : '',
@@ -663,13 +673,20 @@ export class BridgeDriver implements AccountDriver {
             ...(data.summary ? { summary: String(data.summary) } : {}),
           });
           break;
-        case 'at':
+        case 'at': {
+          // 空 qq 会让框架 int('') 崩（AstrBot 实测），这类段直接丢弃。
+          const rawQq = String(data.qq ?? '');
+          if (rawQq !== 'all' && !/^\d+$/.test(rawQq)) {
+            this.#context.logger.debug('driver:bridge', '丢弃目标非数字的 at 段');
+            break;
+          }
           segments.push({
             type: 'at',
-            target: String(data.qq ?? '') === 'all' ? 'all' : String(data.qq ?? ''),
+            target: rawQq === 'all' ? 'all' : rawQq,
             ...(data.name ? { name: String(data.name) } : {}),
           });
           break;
+        }
         case 'reply':
           segments.push({ type: 'reply', id: String(data.id ?? '') });
           break;
@@ -830,7 +847,7 @@ export class BridgeDriver implements AccountDriver {
     let response: Response;
     // Text sends are quick, but media (RichMedia upload) can take much longer;
     // a 5s cap made image sends look like a dead bridge.
-    const timeoutMs = path.startsWith('/api/send') ? 60_000 : 5_000;
+    const timeoutMs = path.startsWith('/api/send') ? 125_000 : 5_000;
     try {
       response = await fetch(`${this.#endpoint}${path}`, {
         method,

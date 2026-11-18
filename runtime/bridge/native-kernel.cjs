@@ -816,8 +816,7 @@ class NativeKernel {
       // 重启后缓存被清空：不知道 peer 就在常见群/私聊里按 id 找一遍（最多 12 个，失败即返回）。
       const candidates = [...this.groupsSeen.keys()].slice(0, 12).map((groupId) => this.peerOf('group', groupId));
       for (const candidate of candidates) {
-        const probeList = await this.msgService
-          .getMsgsByMsgId(candidate, [key])
+        const probeList = await withTimeout(this.msgService.getMsgsByMsgId(candidate, [key]), 2000, 'getMsgsByMsgId')
           .catch(() => null);
         if (Array.isArray(probeList) && probeList.length > 0) {
           this.peerByMsgId.set(key, candidate);
@@ -826,14 +825,14 @@ class NativeKernel {
       }
       throw new Error('该消息不属于当前会话缓存，无法查询（需先收到该消息）');
     }
-    let list = await this.msgService.getMsgsByMsgId(peer, [key]).catch((error) => {
+    let list = await withTimeout(this.msgService.getMsgsByMsgId(peer, [key]), 4000, 'getMsgsByMsgId').catch((error) => {
       this.probe.byMsgIdError = String(error?.message || error);
       return null;
     });
     if (!Array.isArray(list) || list.length === 0) {
       // 自己发出的消息 getMsgsByMsgId 查不到：先在会话首屏里找（发送后 1 分钟内必然在）。
       if (typeof this.msgService.getAioFirstViewLatestMsgs === 'function') {
-        const view = await this.msgService.getAioFirstViewLatestMsgs(peer, 20).catch(() => null);
+        const view = await withTimeout(this.msgService.getAioFirstViewLatestMsgs(peer, 20), 1500, 'getAioFirstViewLatestMsgs').catch(() => null);
         const items = Array.isArray(view)
           ? view
           : Array.isArray(view?.messages)
@@ -854,7 +853,7 @@ class NativeKernel {
       // 再退：按 msgSeq 翻一页（内核要求 5 个参数）。
       const meta = this.metaByMsgId.get(key);
       if (meta && meta.msgSeq && typeof this.msgService.getMsgsBySeqAndCount === 'function') {
-        const page = await this.msgService.getMsgsBySeqAndCount(peer, String(meta.msgSeq), 1, true, false).catch((error) => {
+        const page = await withTimeout(this.msgService.getMsgsBySeqAndCount(peer, String(meta.msgSeq), 1, true, false), 3000, 'getMsgsBySeqAndCount').catch((error) => {
           this.probe.bySeqError = String(error?.message || error);
           return null;
         });
@@ -903,7 +902,7 @@ class NativeKernel {
     try {
       const profile = typeof session.getProfileService === 'function' ? session.getProfileService() : null;
       if (profile && typeof profile.getUserDetailInfoByUin === 'function') {
-        const raw = await profile.getUserDetailInfoByUin(key);
+        const raw = await withTimeout(profile.getUserDetailInfoByUin(key), 5000, 'getUserDetailInfoByUin');
         detail = (raw && (raw.detail || raw.result || raw)) || null;
         this.probe.strangerKeys = detail && typeof detail === 'object' ? Object.keys(detail).slice(0, 12) : null;
       }
@@ -957,7 +956,7 @@ class NativeKernel {
     while (Date.now() < deadline) {
       let raw = null;
       try {
-        raw = await service.getAioFirstViewLatestMsgs(peer, 10);
+        raw = await withTimeout(service.getAioFirstViewLatestMsgs(peer, 10), 1200, 'getAioFirstViewLatestMsgs');
       } catch (error) {
         this.probe.aioLatestError = String(error?.message || error);
         return null;
@@ -1023,7 +1022,8 @@ class NativeKernel {
       }
     }
     const peer = { chatType: scene === 'group' ? CHAT_GROUP : CHAT_PRIVATE, peerUid, guildId: '' };
-    const result = await this.msgService.sendMsg('0', peer, elements, new Map());
+    // 图片要先上传到腾讯 CDN：3MB 的图实测就能超过 12 秒，别把正常发送当超时掐掉。
+    const result = await withTimeout(this.msgService.sendMsg('0', peer, elements, new Map()), 120_000, 'sendMsg');
     if (!result || result.result !== 0) throw new Error('sendMsg 返回 ' + JSON.stringify(result));
     this.probe.sendResultKeys = Object.keys(result).slice(0, 12);
     const textHint = segments
@@ -1253,13 +1253,13 @@ class NativeKernel {
     const buddy = session.getBuddyService();
     // getBuddyListV2 返回的是分组（category + buddyUids），不是用户行；
     // 必须再用资料服务把 uid 映射成 uin/nick（与 NC 一致）。
-    const result = await buddy.getBuddyListV2('0', true, 0);
+    const result = await withTimeout(buddy.getBuddyListV2('0', true, 0), 6000, 'getBuddyListV2');
     const categories = Array.isArray(result && result.data) ? result.data : [];
     const uids = [...new Set(categories.flatMap((item) =>
       Array.isArray(item && item.buddyUids) ? item.buddyUids.map(String) : []))];
     if (uids.length === 0) return [];
     const profile = session.getProfileService();
-    const infos = await profile.getCoreAndBaseInfo('nodeStore', uids);
+    const infos = await withTimeout(profile.getCoreAndBaseInfo('nodeStore', uids), 6000, 'getCoreAndBaseInfo');
     if (!(infos instanceof Map)) throw new Error('好友资料服务未返回 UID 映射');
     return uids.flatMap((uid) => {
       const item = infos.get(uid);
@@ -1353,7 +1353,7 @@ class NativeKernel {
     const cached = this.memberListCache.get(cacheKey);
     if (cached && Date.now() - cached.at < 60_000) return cached.list;
     const session = this.session || this.requireSession();
-    const result = await session.getGroupService().getAllMemberList(String(groupId), false);
+    const result = await withTimeout(session.getGroupService().getAllMemberList(String(groupId), false), 8000, 'getAllMemberList');
     const core = result && typeof result === 'object' ? (result.result ?? result) : result;
     const infos = core && typeof core === 'object' ? core.infos : null;
     const ids = core && typeof core === 'object' ? core.ids : null;
@@ -1466,6 +1466,16 @@ class NativeKernel {
 }
 
 /** 群成员缓存 key：group|uin。 */
+/** 原生回调可能永远不回来：给它加个上限，避免整个 OneBot 动作卡到框架超时。 */
+function withTimeout(promise, ms, label) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error((label || '原生调用') + ' 超时（' + ms + 'ms）')), ms);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
 function peerKey(groupId, uin) {
   return String(groupId) + '|' + String(uin);
 }
@@ -1581,20 +1591,73 @@ async function materializeImage(raw) {
   const crypto = require('node:crypto');
   const value = String(raw ?? '').trim();
   if (!value) return '';
+
+  // http(s) 链接：AstrBot 的图片插件（pixiv 等）给的就是外链，必须自己下载。
+  if (/^https?:\/\//i.test(value)) {
+    return saveImageBuffer(await downloadImage(value));
+  }
+  if (value.startsWith('file://')) {
+    return decodeURIComponent(value.slice('file://'.length));
+  }
+  if (!value.startsWith('base64://') && !(value.startsWith('data:') && value.includes(';base64,'))) {
+    return value;
+  }
+
   let payload = '';
   if (value.startsWith('base64://')) {
     payload = value.slice('base64://'.length);
-  } else if (value.startsWith('data:') && value.includes(';base64,')) {
-    payload = value.slice(value.indexOf(';base64,') + ';base64,'.length);
-  } else if (value.startsWith('file://')) {
-    return value.slice('file://'.length);
   } else {
-    return value;
+    payload = value.slice(value.indexOf(';base64,') + ';base64,'.length);
   }
   const cleaned = payload.replace(/\s+/g, '');
   if (!cleaned) throw new Error('图片 base64 数据为空');
   const buffer = Buffer.from(cleaned, 'base64');
   if (buffer.length === 0) throw new Error('图片 base64 解码失败：' + shortOf(cleaned));
+  return saveImageBuffer(buffer);
+}
+
+/** 外链图片下载：15 秒超时、12MB 上限、只接受图片内容。 */
+async function downloadImage(url) {
+  const MAX_BYTES = 12 * 1024 * 1024;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: { 'user-agent': 'Mozilla/5.0 (duskfox)', accept: 'image/*,*/*;q=0.8' },
+    });
+    if (!response.ok) throw new Error('下载图片失败：HTTP ' + response.status);
+    const type = String(response.headers.get('content-type') || '').toLowerCase();
+    if (type && !type.startsWith('image/') && !type.includes('octet-stream')) {
+      throw new Error('链接不是图片：' + type);
+    }
+    const declared = Number(response.headers.get('content-length') || 0);
+    if (declared > MAX_BYTES) throw new Error('图片过大：' + declared + ' 字节');
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > MAX_BYTES) throw new Error('图片过大：超过 ' + MAX_BYTES + ' 字节');
+      chunks.push(Buffer.from(chunk));
+    }
+    const buffer = Buffer.concat(chunks, size);
+    if (buffer.length === 0) throw new Error('下载到的图片为空');
+    if (buffer.length > MAX_BYTES) throw new Error('图片过大：' + buffer.length + ' 字节');
+    return buffer;
+  } catch (error) {
+    if (error && error.name === 'AbortError') throw new Error('下载图片超时：' + shortOf(url));
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 图片落盘：按内容 md5 命名，供 RichMedia 复制使用。 */
+function saveImageBuffer(buffer) {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const crypto = require('node:crypto');
   const dir = mediaTmpDir();
   fs.mkdirSync(dir, { recursive: true });
   pruneMediaDir(dir);

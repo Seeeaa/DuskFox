@@ -27,8 +27,8 @@ export function toOb11Segments(native, helpers = {}) {
       const atType = Number(text.atType ?? 0);
       const atNtUid = String(text.atNtUid ?? '');
       const atUid = String(text.atUid ?? '');
-        const rawUid = [atNtUid, atUid].find((uid) => uid && uid !== '0') || '';
-        const isAt = atType > 0 || Boolean(rawUid);
+      const rawUid = [atNtUid, atUid].find((uid) => uid && uid !== '0') || '';
+      const isAt = atType > 0 || Boolean(rawUid);
       if (isAt) {
         const resolved = rawUid && uinOfUid ? uinOfUid(rawUid) : '';
         if (rawUid) {
@@ -40,12 +40,13 @@ export function toOb11Segments(native, helpers = {}) {
           }
         }
         const content = String(text.content ?? '');
-        // OneBot 的 at.qq 必须是数字或 all；未解析的 uid 保留为文本。
-        if (rawUid && !/^\d+$/.test(resolved)) {
+        // OneBot 的 at.qq 必须是数字或 all；uid 没映射上但本身是数字（atUid 存 uin）时直接用。
+        const qq = /^\d+$/.test(resolved) ? resolved : /^\d+$/.test(atUid) ? atUid : /^\d+$/.test(rawUid) ? rawUid : '';
+        if (rawUid && !qq) {
           segments.push({ type: 'text', data: { text: content } });
           continue;
         }
-        segments.push({ type: 'at', data: { qq: rawUid ? resolved : 'all' } });
+        segments.push({ type: 'at', data: { qq: rawUid ? qq : 'all' } });
         const rest = content.startsWith('@') ? '' : content;
         if (rest.trim()) segments.push({ type: 'text', data: { text: rest } });
         continue;
@@ -84,7 +85,8 @@ export function toOb11Segments(native, helpers = {}) {
       const id = candidates
         .map((value) => String(value ?? ''))
         .find((value) => value && value !== '0') ?? '';
-      segments.push({ type: 'reply', data: { id } });
+      // 空 id 会让框架 int('') 崩，宁可不带引用段。
+      if (id) segments.push({ type: 'reply', data: { id } });
       continue;
     }
   }
@@ -601,7 +603,8 @@ export function createBridgeServer(options) {
     let bodyText = '';
     request.on('data', (chunk) => {
       bodyText += String(chunk);
-      if (bodyText.length > 1024 * 1024) request.destroy();
+      // 图片段是 base64，几 MB 很正常；上限给到 64MB。
+      if (bodyText.length > 64 * 1024 * 1024) request.destroy();
     });
     request.on('end', async () => {
       const supplied = String(request.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
@@ -619,7 +622,7 @@ export function createBridgeServer(options) {
         logger.error?.('[bridge] handler failed: ' + (error instanceof Error ? error.stack : String(error)));
         if (!response.headersSent) {
           response.writeHead(500, { 'content-type': 'application/json' });
-          response.end(JSON.stringify({ error: 'internal error', detail: error instanceof Error ? error.message : String(error) }));
+          response.end(JSON.stringify({ error: 'internal error' }));
         }
       }
     });

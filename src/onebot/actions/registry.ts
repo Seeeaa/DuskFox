@@ -91,8 +91,11 @@ export class ActionRegistry {
     const params = this.#validate(definition, rawParams);
     const started = performance.now();
     try {
-      const data = await definition.handle(params, context);
-      this.#logger.debug('onebot', `${actionName} ok (${Math.round(performance.now() - started)}ms)`);
+      // 原生调用偶尔会一直不回来；不设上限的话框架会等满 60 秒再报 WS API 超时。
+      const data = await withTimeout(definition.handle(params, context), ACTION_TIMEOUT_MS, actionName);
+      const elapsed = Math.round(performance.now() - started);
+      if (elapsed > 3000) this.#logger.warn('onebot', `${actionName} 较慢：${elapsed}ms`);
+      else this.#logger.debug('onebot', `${actionName} ok (${elapsed}ms)`);
       return data;
     } catch (error) {
       if (error instanceof ActionError) throw error;
@@ -128,6 +131,18 @@ export class ActionRegistry {
     }
     return cleaned;
   }
+}
+
+/** 单个 OneBot 动作的最长等待时间；发图要上传 CDN，比普通文本慢得多。 */
+const ACTION_TIMEOUT_MS = 130_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const deadline = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(label + ' 超时（' + ms + 'ms）')), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
 function normaliseName(name: string): string {

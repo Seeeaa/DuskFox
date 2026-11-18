@@ -26,7 +26,8 @@ export class WsServerAdapter extends NetworkAdapter {
   async start(): Promise<void> {
     const config = this.config as WsServerConnection;
     this.#status = 'starting';
-    const server = new WebSocketServer({ host: config.host, port: config.port, maxPayload: 1024 * 1024, perMessageDeflate: false });
+    // 与 ws-client 一致：base64 图片一帧可能几 MB。
+    const server = new WebSocketServer({ host: config.host, port: config.port, maxPayload: 64 * 1024 * 1024, perMessageDeflate: false });
     this.#server = server;
     server.on('connection', (socket: WebSocket, request: IncomingMessage) => this.#onConnection(socket, request));
     server.on('error', (error: Error) => {

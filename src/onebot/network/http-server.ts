@@ -6,12 +6,13 @@ import type { Ob11EventBase } from '../types.ts';
 import { failedResponse } from '../types.ts';
 import { NetworkAdapter, waitForListening, type ConnectionInfo, type ConnectionStatus } from './base.ts';
 
-const MAX_BODY = 1024 * 1024;
+// 图片以 base64 走 JSON body，1 MB 连一张普通图都放不下。
+const MAX_BODY = 64 * 1024 * 1024;
 
 /**
  * HTTP + WebSocket API server.
  *
- * One port serves both transports: `POST /send_msg` calls an
+ * One port serves both transports, like NapCat: `POST /send_msg` calls an
  * action, and when `enableWs` is on, an upgrade on `/api` yields an action-only
  * socket while any other path receives the event stream as well.
  */
