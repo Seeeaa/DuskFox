@@ -102,9 +102,11 @@ export function toOb11Segments(native, helpers = {}) {
       });
       continue;
     }
-    if (element?.fileElement) {
-      // FileElement：fileName/filePath/fileSize 都是实机字段；路径属于 QQ 容器。
+    if (Number(element?.elementType) === 3 || element?.fileElement) {
+      // 08 真机实测：普通文件元素 elementType=3，键 fileElement；无该元素时其它元素位为 null。
+      // 路径属于 QQ 容器，跨容器只能走 /api/media 取 base64。
       const file = element.fileElement;
+      if (!file) continue;
       segments.push({
         type: 'file',
         data: {
@@ -116,9 +118,10 @@ export function toOb11Segments(native, helpers = {}) {
       });
       continue;
     }
-    if (element?.videoElement) {
-      // VideoElement：fileTime 是秒；元数据只报客户端真的给了的字段。
+    if (Number(element?.elementType) === 5 || element?.videoElement) {
+      // 真机实测 elementType=5，键 videoElement；fileTime 单位未从值侧确认，按秒透出并标注待测。
       const video = element.videoElement;
+      if (!video) continue;
       const seconds = Number(video.fileTime) || 0;
       segments.push({
         type: 'video',
@@ -132,10 +135,12 @@ export function toOb11Segments(native, helpers = {}) {
       });
       continue;
     }
-    if (element?.multiForwardMsgElement) {
-      // 合并转发：只带得上 id 时靠 get_forward_msg 展开，不在这里猜节点。
+    if (Number(element?.elementType) === 16 || element?.multiForwardMsgElement) {
+      // 真机实测 elementType=16，键 multiForwardMsgElement{xmlContent,resId,fileName}；
+      // 真机**没有 forwardElement** 这个键，别再用它兜底。
       const forward = element.multiForwardMsgElement;
-      const id = String(forward.resId || forward.msgId || forward.fileName || '');
+      if (!forward) continue;
+      const id = String(forward.resId || forward.msgId || '');
       segments.push({ type: 'forward', data: { id } });
       continue;
     }
