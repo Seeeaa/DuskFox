@@ -1,4 +1,11 @@
-import type { AccountDriver, Capabilities, DriverContext, DriverOptions, SendResult } from './types.ts';
+import type {
+  AccountDriver,
+  Capabilities,
+  DriverContext,
+  DriverOptions,
+  MediaPayload,
+  SendResult,
+} from './types.ts';
 import { capabilityMap } from './types.ts';
 import type {
   AccountNotice,
@@ -646,6 +653,28 @@ export class BridgeDriver implements AccountDriver {
   }
 
   /**
+   * Media bytes behind `get_record`. Contract v1 runtimes and runtimes without a
+   * local RichMedia file answer 501/404, which is reported as "no bytes" so the
+   * action can fail honestly instead of returning empty audio.
+   */
+  async fetchMedia(nativeId: string, kind: 'image' | 'record'): Promise<MediaPayload | null> {
+    if (this.#contract < 2) return null;
+    if (!nativeId) return null;
+    try {
+      const data = await this.#request<{ base64?: string; name?: string; size?: number }>(
+        `/api/media?message_id=${encodeURIComponent(nativeId)}&kind=${kind === 'record' ? 'record' : 'image'}`,
+      );
+      const base64 = String(data.base64 ?? '');
+      if (!base64) return null;
+      return { base64, name: String(data.name ?? ''), size: Number(data.size ?? 0) };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('HTTP 404') || message.includes('HTTP 501')) return null;
+      throw error;
+    }
+  }
+
+  /**
    * Parse the runtime's OneBot-shaped segments into the framework model.
    * Every supported kind is mapped explicitly; anything else is kept as
    * `unknown` with its raw payload so the console can show it instead of
@@ -692,7 +721,13 @@ export class BridgeDriver implements AccountDriver {
           segments.push({ type: 'reply', id: String(data.id ?? '') });
           break;
         case 'record':
-          segments.push({ type: 'record', file: String(data.file ?? data.url ?? ''), ...(data.url ? { url: String(data.url) } : {}) });
+          segments.push({
+            type: 'record',
+            file: String(data.file ?? data.url ?? ''),
+            ...(data.url ? { url: String(data.url) } : {}),
+            ...(data.path ? { path: String(data.path) } : {}),
+            ...(data.file_size !== undefined ? { size: Number(data.file_size) } : {}),
+          });
           break;
         case 'video':
           segments.push({ type: 'video', file: String(data.file ?? data.url ?? ''), ...(data.url ? { url: String(data.url) } : {}) });
@@ -1036,7 +1071,15 @@ function toWireSegment(segment: Segment): Record<string, unknown> {
     case 'reply':
       return { type: 'reply', data: { id: segment.id } };
     case 'record':
-      return { type: 'record', data: { file: segment.file, ...(segment.url ? { url: segment.url } : {}) } };
+      return {
+        type: 'record',
+        data: {
+          file: segment.file,
+          ...(segment.url ? { url: segment.url } : {}),
+          ...(segment.path ? { path: segment.path } : {}),
+          ...(segment.size !== undefined ? { file_size: segment.size } : {}),
+        },
+      };
     case 'video':
       return { type: 'video', data: { file: segment.file, ...(segment.url ? { url: segment.url } : {}) } };
     case 'file':

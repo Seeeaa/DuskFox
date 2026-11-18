@@ -245,6 +245,22 @@ async function main() {
     const imageSegment = imageEvent.message.find((s) => s.type === 'image');
     record('图片入站：url 段未被丢弃或降级', imageSegment?.data?.url === imageUrl, JSON.stringify(imageSegment));
 
+    const voiceUrl = 'https://example.test/acceptance.amr';
+    await emit({ scene: 'private', peerId: '20002', userId: '20002', voice: voiceUrl });
+    const voiceEvent = await waitFor('语音入站', () => {
+      const hit = botFrames.find((f) => f.post_type === 'message' && Array.isArray(f.message) && f.message.some((s) => s.type === 'record'));
+      return hit ?? null;
+    }, 12_000);
+    const voiceSegment = voiceEvent.message.find((s) => s.type === 'record');
+    record(
+      '语音入站：record 段带 file/path/url/file_size',
+      voiceSegment?.data?.url === voiceUrl &&
+        /^voice-\d+\.amr$/.test(String(voiceSegment?.data?.file ?? '')) &&
+        /voice\.amr$/.test(String(voiceSegment?.data?.path ?? '')) &&
+        Number(voiceSegment?.data?.file_size) > 0,
+      JSON.stringify(voiceSegment),
+    );
+
     // ------------------------------------------------------------ 独立 OneBot HTTP 动作
     const h = { 'content-type': 'application/json' };
     const httpVersion = await fetch(conns.http + '/get_version_info', { headers: h });
@@ -261,6 +277,33 @@ async function main() {
       body: JSON.stringify({ user_id: 20001, message: [{ type: 'image', data: { file: 'data:image/png;base64,iVBORw0KGgo=' } }] }),
     });
     record('OneBot HTTP：send_private_msg 图片', httpImage.status === 200 && (await httpImage.json()).status === 'ok');
+
+    const canRecord = await fetch(conns.http + '/can_send_record', { headers: h });
+    record('OneBot HTTP：can_send_record 与运行时段能力一致', (await canRecord.json()).data.yes === true);
+    const voicePayload = 'base64://' + Buffer.concat([Buffer.from('#!AMR\n', 'latin1'), Buffer.alloc(16)]).toString('base64');
+    const httpVoice = await fetch(conns.http + '/send_private_msg', {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({ user_id: 20001, message: [{ type: 'record', data: { file: voicePayload } }] }),
+    });
+    const httpVoiceJson = await httpVoice.json();
+    record('OneBot HTTP：send_private_msg 语音', httpVoice.status === 200 && httpVoiceJson.status === 'ok', JSON.stringify(httpVoiceJson).slice(0, 120));
+    const gotRecord = await fetch(conns.http + '/get_record', {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({ message_id: httpVoiceJson.data?.message_id ?? 0 }),
+    });
+    const gotRecordJson = await gotRecord.json();
+    const gotRecordBytes = String(gotRecordJson.data?.file ?? '').startsWith('base64://')
+      ? Buffer.from(String(gotRecordJson.data.file).slice('base64://'.length), 'base64')
+      : Buffer.alloc(0);
+    record(
+      'OneBot HTTP：get_record 取回语音字节',
+      gotRecordJson.status === 'ok' &&
+        gotRecordBytes.toString('latin1', 0, 6) === '#!AMR\n' &&
+        /^voice[^\\/]*\.amr$/.test(String(gotRecordJson.data?.file_name ?? '')),
+      'name=' + String(gotRecordJson.data?.file_name ?? '') + ' bytes=' + gotRecordBytes.length,
+    );
 
     // ------------------------------------------------------------ WS 动作 + 控制台调试
     const wsAction = await new Promise((resolve, reject) => {

@@ -242,6 +242,39 @@ export const messageActions: Array<ActionDefinition<any, any>> = [
     },
   },
   {
+    name: 'get_record',
+    description: '取语音消息的音频数据（base64）',
+    requires: ['mediaDownload'],
+    params: Type.Object({
+      message_id: Type.Optional(MessageIdSchema),
+      // OneBot 规范用消息段的 file 定位；我们只能在自己的最近窗口里反查。
+      file: Type.Optional(Type.String()),
+    }),
+    async handle(params: { message_id?: number; file?: string }, context: ActionContext) {
+      let nativeId = '';
+      if (params.message_id !== undefined) {
+        nativeId = context.messageIds.resolve(params.message_id)?.nativeId ?? '';
+      }
+      const wanted = String(params.file ?? '');
+      if (!nativeId && wanted) {
+        const hit = context.messages
+          .recent(500)
+          .find((item) => item.segments.some((segment) => segment.type === 'record' && segment.file === wanted));
+        nativeId = hit?.nativeId ?? '';
+      }
+      if (!nativeId) {
+        throw new ActionError('需要 message_id，或一个仍在保留窗口内的语音 file', RETCODE.notFound);
+      }
+      if (!context.driver.fetchMedia) throw new ActionError('当前驱动不支持媒体下载', RETCODE.unsupported);
+      const media = await context.driver.fetchMedia(nativeId, 'record');
+      if (!media) {
+        throw new ActionError('运行时取不到该语音的音频：文件可能尚未落到本地，或在 QQ 里播放过一次后重试', RETCODE.notFound);
+      }
+      // 规范只定义 file；这里是 base64:// 形式（AstrBot 回传语音时同样用这种形式）。
+      return { file: 'base64://' + media.base64, file_name: media.name, file_size: media.size };
+    },
+  },
+  {
     name: 'delete_msg',
     description: '撤回已发送或收到的消息',
     requires: ['recall'],

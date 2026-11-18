@@ -77,6 +77,31 @@ export function toOb11Segments(native, helpers = {}) {
       });
       continue;
     }
+    if (element?.pttElement) {
+      // 语音在 QQ 里是 pttElement。它没有可直接播放的 HTTP 地址：音频以客户端
+      // RichMedia 目录里的落盘文件为准，由 /api/media?kind=record（OneBot
+      // get_record）按消息 id 取，所以这里只给文件名和确实存在的 url。
+      const ptt = element.pttElement;
+      // QQ 的 pttElement 没有 originUrl：http 链接要拿 fileUuid 走 GetPttUrl，
+      // 拿不到就只保留客户端给的文件名与本地路径（与 NapCat 一致）。
+      // 路径属于 QQ 容器，不是 Fox 宿主机。
+      const filePath = String(ptt.filePath || '');
+      const size = Number(ptt.fileSize);
+      // pttElement 本身没有 originUrl（NapCat 的 PttElement 定义里也没有）；只有
+      // 运行时真的用 GetPttUrl 换到了 http 链接才会带 url。
+      const rawUrl = String(ptt.pttUrl || ptt.url || '');
+      const url = rawUrl.startsWith('http') ? rawUrl : '';
+      segments.push({
+        type: 'record',
+        data: {
+          file: String(ptt.fileName || ptt.fileUuid || ptt.md5HexStr || ''),
+          ...(filePath ? { path: filePath } : {}),
+          ...(url ? { url } : {}),
+          ...(Number.isFinite(size) && size > 0 ? { file_size: String(ptt.fileSize) } : {}),
+        },
+      });
+      continue;
+    }
     if (element?.faceElement) {
       segments.push({ type: 'face', data: { id: String(element.faceElement.faceIndex ?? '') } });
       continue;
@@ -141,7 +166,10 @@ export function createBridgeServer(options) {
   const contractVersion = 2;
   /** Which segments this runtime can send / receive, direction is explicit. */
   const sendSegments = (kernel && kernel.sendSegments) || ['text', 'image'];
-  const recvSegments = (kernel && kernel.recvSegments) || ['text', 'image', 'face', 'at', 'reply'];
+  const recvSegments = (kernel && kernel.recvSegments) || ['text', 'image', 'face', 'at', 'reply', 'record'];
+  /** 段能力的方向必须如实分开报告：能收语音不等于能发语音。 */
+  const canSend = (kind) => Array.isArray(sendSegments) && sendSegments.includes(kind);
+  const canRecv = (kind) => Array.isArray(recvSegments) && recvSegments.includes(kind);
   const features = {
     privateMessage: true,
     groupMessage: true,
@@ -154,9 +182,12 @@ export function createBridgeServer(options) {
     groupMemberList: true,
     messageQuery: true,
     requestHandle: true,
-    mediaRecord: false,
+    // 语音：入站由 pttElement 解析，出站需要客户端 RichMedia 路径接口。
+    mediaRecord: canRecv('record') || canSend('record'),
     mediaVideo: false,
     mediaFile: false,
+    // 运行时能否按消息 id 取回媒体字节（OneBot get_record 的后端）。
+    mediaDownload: typeof kernel.media === 'function',
     passwordLogin: Boolean(kernel && kernel.passwordLoginEnabled),
     quickLogin: Boolean(kernel && kernel.quickLoginSupported),
     logout: false,
@@ -453,7 +484,12 @@ export function createBridgeServer(options) {
         if (!Array.isArray(body.segments) || body.segments.length === 0) return send(400, { error: 'segments 不能为空' });
         for (const segment of body.segments) {
           if (segment?.type === 'image' && !segment?.data?.file) return send(400, { error: '图片段缺少 file' });
-          if (segment?.type === 'record' || segment?.type === 'video' || segment?.type === 'file') {
+          if (segment?.type === 'record') {
+            if (!canSend('record')) return send(501, { error: '运行时不支持语音发送' });
+            if (!String(segment?.data?.file ?? '').trim()) return send(400, { error: '语音段缺少 file' });
+            continue;
+          }
+          if (segment?.type === 'video' || segment?.type === 'file') {
             return send(501, { error: '运行时未实现 ' + segment.type + ' 发送' });
           }
         }

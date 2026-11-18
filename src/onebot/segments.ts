@@ -63,7 +63,10 @@ export function toOb11Segment(segment: Segment): Ob11Segment {
       return { type: 'reply', data: { id: segment.id } };
     case 'record': {
       const data: Record<string, unknown> = { file: segment.file };
+      // NapCat 习惯额外给 path / file_size，AstrBot 在 file 只是文件名时会用 path。
       if (segment.url) data.url = segment.url;
+      if (segment.path) data.path = segment.path;
+      if (segment.size !== undefined) data.file_size = segment.size;
       return { type: 'record', data };
     }
     case 'video': {
@@ -117,7 +120,13 @@ export function fromOb11Segment(segment: Ob11Segment): Segment {
     case 'reply':
       return { type: 'reply', id: String(data.id ?? '') };
     case 'record':
-      return { type: 'record', file: String(data.file ?? data.url ?? ''), ...(data.url ? { url: String(data.url) } : {}) };
+      return {
+        type: 'record',
+        file: String(data.file ?? data.url ?? ''),
+        ...(data.url ? { url: String(data.url) } : {}),
+        ...(data.path ? { path: String(data.path) } : {}),
+        ...(data.file_size !== undefined ? { size: Number(data.file_size) } : {}),
+      };
     case 'video':
       return { type: 'video', file: String(data.file ?? data.url ?? ''), ...(data.url ? { url: String(data.url) } : {}) };
     case 'file':

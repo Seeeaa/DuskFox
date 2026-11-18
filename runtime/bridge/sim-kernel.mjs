@@ -9,9 +9,12 @@
  * path the native kernel will use. This file is test infrastructure only.
  */
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const ELEMENT_TEXT = 1;
 const ELEMENT_PIC = 2;
+const ELEMENT_PTT = 4;
 
 function svgAvatar(text) {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#0d0d0d"/><text x="32" y="42" font-family="Arial" font-size="24" font-weight="bold" fill="#df7f43" text-anchor="middle">' + text + '</text></svg>';
@@ -26,6 +29,25 @@ export const TINY_PNG = Buffer.from(
 export function pngDataUrl() {
   return 'data:image/png;base64,' + TINY_PNG.toString('base64');
 }
+
+/** Minimal AMR header so the simulated voice is real bytes, not a fake success. */
+export const TINY_AMR = Buffer.concat([Buffer.from('#!AMR\n', 'latin1'), Buffer.alloc(16)]);
+
+/**
+ * 收到的语音在 QQ 侧是 RichMedia 落盘文件，pttElement.filePath 指向它。
+ * 模拟内核落一份真文件，好让 record 段的 path 字段与 get_record 都是真的。
+ */
+const SIM_VOICE_PATH = (() => {
+  try {
+    const dir = path.join(os.tmpdir(), 'duskfox-sim');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'voice.amr');
+    if (!fs.existsSync(file)) fs.writeFileSync(file, TINY_AMR);
+    return file;
+  } catch (error) {
+    return '';
+  }
+})();
 
 const FRIENDS = [
   { uid: 'u_20001', uin: '20001', nick: '好友甲', remark: '甲', category: 0 },
@@ -53,8 +75,8 @@ export class SimKernel {
   constructor(options = {}) {
     this.mode = 'sim';
     this.version = 'sim-kernel-1.0';
-    this.sendSegments = ['text', 'image'];
-    this.recvSegments = ['text', 'image', 'face', 'at', 'reply'];
+    this.sendSegments = ['text', 'image', 'record'];
+    this.recvSegments = ['text', 'image', 'face', 'at', 'reply', 'record'];
     this.passwordLoginEnabled = true;
     this.uin = '10001';
     this.nick = '模拟测试号';
@@ -158,6 +180,21 @@ export class SimKernel {
           },
         });
         normalized.push({ type: 'image', data: { file, url: file.startsWith('data:') || file.startsWith('http') ? file : '' } });
+      } else if (segment.type === 'record') {
+        const file = String(segment.data.file ?? segment.data.url ?? '');
+        if (!file) throw new Error('语音段缺少 file');
+        elements.push({
+          elementType: ELEMENT_PTT,
+          elementId: '',
+          pttElement: {
+            // base64:// 与 data: 不是路径，不能拿整段载荷当文件名。
+            fileName: /^(base64:\/\/|data:)/.test(file) ? 'voice.amr' : (file.split(/[\\/]/).pop() || 'voice.amr'),
+            fileSize: String(TINY_AMR.length),
+            md5HexStr: 'sim-ptt-md5',
+            sourcePath: file.startsWith('data:') || file.startsWith('base64://') ? '(sim-media)' : file,
+          },
+        });
+        normalized.push({ type: 'record', data: { file, url: file.startsWith('http') ? file : '' } });
       } else {
         elements.push({ elementType: ELEMENT_TEXT, elementId: '', textElement: { content: '[' + segment.type + ']' } });
         normalized.push(segment);
@@ -242,8 +279,8 @@ export class SimKernel {
     return true;
   }
 
-  /** Test hook: push an inbound message (optionally with an image). */
-  incoming({ scene = 'private', peerId, userId, nick, text, imageUrl, time = Date.now() }) {
+  /** Test hook: push an inbound message (optionally with an image or a voice note). */
+  incoming({ scene = 'private', peerId, userId, nick, text, imageUrl, voice, time = Date.now() }) {
     const peer = String(peerId ?? (scene === 'group' ? '30001' : '20001'));
     const sender = String(userId ?? (scene === 'group' ? '20001' : peer));
     const elements = [];
@@ -258,6 +295,22 @@ export class SimKernel {
           originImageUrl: String(imageUrl),
           thumbImageUrl: String(imageUrl),
           md5HexStr: 'sim-in-md5',
+        },
+      });
+    }
+    if (voice) {
+      // 语音在 QQ 里是 RichMedia 落盘文件；voice 传 http(s) 时再模拟拿到 pttUrl。
+      elements.push({
+        elementType: ELEMENT_PTT,
+        elementId: 'sim-el-voice-' + (this.seq + 1),
+        pttElement: {
+          fileName: 'voice-' + (this.seq + 1) + '.amr',
+          filePath: SIM_VOICE_PATH,
+          fileSize: String(TINY_AMR.length),
+          md5HexStr: 'sim-ptt-' + (this.seq + 1),
+          duration: 3,
+          formatType: 1,
+          ...(/^https?:\/\//i.test(String(voice)) ? { pttUrl: String(voice) } : {}),
         },
       });
     }
@@ -277,6 +330,24 @@ export class SimKernel {
     };
     this.messages.set(msgId, native);
     this.emit({ type: 'message', native });
+  }
+
+  /** Simulated media fetch behind /api/media (image or voice). */
+  async media(msgId, kind) {
+    const msg = this.messages.get(String(msgId));
+    if (!msg || !Array.isArray(msg.elements)) throw new Error('消息不存在或不可读');
+    const key = kind === 'record' ? 'pttElement' : 'picElement';
+    const element = msg.elements.map((item) => item && item[key]).find(Boolean);
+    if (!element) throw new Error('该消息不包含' + (kind === 'record' ? '语音' : '图片'));
+    let payload = kind === 'record' ? TINY_AMR : TINY_PNG;
+    if (kind === 'record' && element.filePath && fs.existsSync(element.filePath)) {
+      payload = fs.readFileSync(element.filePath);
+    }
+    return {
+      base64: payload.toString('base64'),
+      name: String(element.fileName || (kind === 'record' ? 'voice.amr' : 'image.png')),
+      size: payload.length,
+    };
   }
 
   /** Native-style lookup used by /api/message and the framework's get_msg. */

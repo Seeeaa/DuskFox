@@ -28,8 +28,12 @@ export class SimKernel {
   groupMember(groupId: string, userId: string): Promise<unknown>;
   groupMembers(groupId: string): Promise<unknown[]>;
   handleRequest(input: { flag: string; approve: boolean; type: string; subType?: string }): Promise<boolean>;
+  media(msgId: string, kind?: string): Promise<{ base64: string; name: string; size: number }>;
+  getMessage(msgId: string): Promise<unknown>;
 }
 
 export function createSimKernelFromEnv(): SimKernel;
 export const TINY_PNG: Buffer;
+/** 语音的模拟音频字节（AMR 头 + 静音），供 get_record 的离线闭环使用。 */
+export const TINY_AMR: Buffer;
 export function pngDataUrl(): string;

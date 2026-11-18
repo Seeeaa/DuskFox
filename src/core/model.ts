@@ -35,8 +35,17 @@ export interface ReplySegment {
 
 export interface RecordSegment {
   readonly type: 'record';
+  /** File name or runtime-side handle; not always a usable path. */
   readonly file: string;
   readonly url?: string;
+  /**
+   * Local path resolved by the runtime (QQ container), when it knows one.
+   * AstrBot and other bots fall back to this when `file` is only a name, so it
+   * is reported as a NapCat-style extension key, not as a Fox path.
+   */
+  readonly path?: string;
+  /** Byte size as reported by the client (string on the wire). */
+  readonly size?: number;
 }
 
 export interface VideoSegment {

@@ -103,6 +103,13 @@ export interface SendResult {
   readonly messageId: string;
 }
 
+/** Raw media bytes handed to OneBot `get_record`. */
+export interface MediaPayload {
+  readonly base64: string;
+  readonly name: string;
+  readonly size: number;
+}
+
 /** Contract every account backend implements. */
 export interface AccountDriver {
   readonly id: string;
@@ -128,6 +135,11 @@ export interface AccountDriver {
   sendMessage(message: OutboundMessage): Promise<SendResult>;
   /** Look a message up by its native id (used by `get_msg` when the window missed it). */
   fetchMessage?(nativeId: string): Promise<InboundMessage | null>;
+  /**
+   * Download the media attached to a message as base64 (used by `get_record`).
+   * Returns null when the runtime has no bytes for that message.
+   */
+  fetchMedia?(nativeId: string, kind: 'image' | 'record'): Promise<MediaPayload | null>;
   recall(messageId: string): Promise<void>;
   friendList(): Promise<Friend[]>;
   groupList(): Promise<Group[]>;

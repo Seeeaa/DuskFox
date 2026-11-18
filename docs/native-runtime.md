@@ -109,8 +109,14 @@ DISPLAY=:99 /opt/QQ/qq --no-sandbox &
 | `/api/group-members?group_id=` | get_group_member_list |
 | `/api/recall` (POST `{message_id}`) | delete_msg |
 | `/api/request` (POST `{flag,approve,type,sub_type?}`) | set_friend_add_request / set_group_add_request |
+| `/api/media?message_id=&kind=record` | get_record（返回 `{base64,name,size}`，文件未落到本地时 404） |
 
 `features` 是能力开关，框架只会打开运行时**明确声明为 true** 的项，其余保持“不支持”并返回 1200/1404。
+
+`send_segments` / `recv_segments` 按**方向**声明能收发的消息段（`text`/`image`/`record`/`at`/`reply`…）。语音必须两个方向都含 `record`
+且 `features.mediaRecord` 为 true，框架才会认为可发送；只声明入站时 `can_send_record` 仍为 `no`。
+
+语音段的 `path` 是 **QQ 容器里的 RichMedia 落盘路径**，不是 Fox 宿主机路径；`url` 只有在运行时真的换到 http 链接时才出现。
 
 ### 4.3 需要改的运行时文件（旧 `bridge_webui.cjs`）
 
