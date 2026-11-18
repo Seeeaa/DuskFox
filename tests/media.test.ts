@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { attachKernelEvents, createBridgeServer } from '../runtime/bridge/server.mjs';
+import { attachKernelEvents, createBridgeServer, toOb11Segments } from '../runtime/bridge/server.mjs';
 import { SimKernel, TINY_FILE, TINY_VIDEO } from '../runtime/bridge/sim-kernel.mjs';
 import { startInstance, waitFor } from './helpers.ts';
 
@@ -25,6 +25,34 @@ async function bootPair() {
   await waitFor(async () => (await instance.call('GET', '/api/status')).json.account.online === true, 10_000);
   return { runtime, instance };
 }
+
+test('入站按 elementType 判别：3=文件 / 5=视频 / 16=转发（08 真机字段）', () => {
+  const file = toOb11Segments({ elements: [{ elementType: 3, fileElement: { fileName: 'a.pdf', filePath: '/qq/a.pdf', fileSize: '12' } }] });
+  assert.equal(file[0]?.type, 'file');
+  assert.equal(file[0]?.data.file_size, '12');
+  assert.equal(file[0]?.data.path, '/qq/a.pdf');
+
+  const video = toOb11Segments({ elements: [{ elementType: 5, videoElement: { fileName: 'v.mp4', fileTime: 9, fileSize: '10' } }] });
+  assert.equal(video[0]?.type, 'video');
+  assert.equal(video[0]?.data.duration, 9);
+
+  const forward = toOb11Segments({ elements: [{ elementType: 16, multiForwardMsgElement: { resId: 'res-9', xmlContent: 'x', fileName: '摘要' } }] });
+  assert.deepEqual(forward[0], { type: 'forward', data: { id: 'res-9' } });
+});
+
+test('入站：elementType 命中但元素体为空时不产出空段；旧的 forwardElement 形状不再被识别', () => {
+  const empty = toOb11Segments({
+    elements: [
+      { elementType: 3, fileElement: null },
+      { elementType: 5, videoElement: null },
+      { elementType: 16, multiForwardMsgElement: null },
+    ],
+  });
+  assert.deepEqual(empty, []);
+  // 08 实测元素里没有 forwardElement 这个键，这条分支已删除。
+  const legacy = toOb11Segments({ elements: [{ elementType: 16, forwardElement: { id: 'legacy' } }] });
+  assert.deepEqual(legacy, []);
+});
 
 function storedWith(instance: any, kind: string) {
   const hit = instance.app.service.messages.recent(10).find((item: any) => item.segments.some((s: any) => s.type === kind));

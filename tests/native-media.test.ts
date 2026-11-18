@@ -95,6 +95,33 @@ test('原生合并转发展开：按 getMultiMsg(parentPeer, 最外层id, msgId)
   assert.equal(calls[0][2], 'fwd-outer');
 });
 
+test('原生合并转发展开：缺 parentMsgPeer/parentMsgIdList 时用 chatType+peerUid 兜底', async () => {
+  const calls: any[] = [];
+  const { kernel } = probe({
+    getMultiMsg: async (...args: any[]) => {
+      calls.push(args);
+      return { msgList: [{ msgId: 'inner-1' }] };
+    },
+  });
+  kernel.getMessage = async () => ({
+    msgId: 'fwd-private',
+    chatType: 1,
+    peerUid: 'u_20001',
+    elements: [{ elementType: 16, multiForwardMsgElement: { resId: 'res-2', xmlContent: '', fileName: '摘要' } }],
+  });
+  const nodes = await kernel.getForward('fwd-private');
+  assert.ok(nodes);
+  assert.equal(nodes.length, 1);
+  assert.deepEqual(calls[0][0], { chatType: 1, guildId: '', peerUid: 'u_20001' });
+  assert.equal(calls[0][1], 'fwd-private', '没有 parentMsgIdList 时最外层 id 退回自身');
+});
+
+test('原生合并转发展开：返回结构认不出时返回 null，不把 raw 对象当节点', async () => {
+  const { kernel } = probe({ getMultiMsg: async () => ({ unexpected: true }) });
+  kernel.getMessage = async () => ({ msgId: 'x', chatType: 1, peerUid: 'u', elements: [] });
+  assert.equal(await kernel.getForward('x'), null);
+});
+
 test('原生合并转发展开：客户端没有 getMultiMsg 时必须报错而不是返回空节点', async () => {
   const { kernel } = probe({});
   await assert.rejects(() => kernel.getForward('any'), /getMultiMsg/);

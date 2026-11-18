@@ -1083,10 +1083,18 @@ class NativeKernel {
       guildId: '',
       peerUid: String(owner.peerUid ?? ''),
     };
+    // 08 真机探针未见 parentMsgPeer / parentMsgIdList（受 24 键上限影响，未断言不存在），
+    // 所以这里两条路都留：有就用，没有就用当前消息的 chatType/peerUid 组 peer，最外层 id 退回自身 msgId。
     const outermost = String((Array.isArray(owner.parentMsgIdList) && owner.parentMsgIdList[0]) || key);
     const raw = await withTimeout(service.getMultiMsg(peer, outermost, key), 5000, 'getMultiMsg');
-    const list = raw && (raw.msgList || raw.messages || raw);
+    // 返回结构未实测（08 报告第六节）；只接受明确的列表外壳，认不出就返回 null，
+    // 由上层报"无法展开"，绝不把整个 raw 对象当节点数组。
+    const list = Array.isArray(raw) ? raw : raw && (raw.msgList || raw.messages);
+    this.probe.forwardOwnerKeys = Object.keys(owner).slice(0, 24);
+    this.probe.forwardHadParentPeer = Boolean(owner.parentMsgPeer);
+    this.probe.forwardRawKeys = raw && typeof raw === 'object' ? Object.keys(raw).slice(0, 12) : String(typeof raw);
     if (!Array.isArray(list) || list.length === 0) return null;
+    this.probe.forwardNodeKeys = Object.keys(list[0] || {}).slice(0, 16);
     return list;
   }
 
@@ -1945,7 +1953,8 @@ function elementKind(element) {
   if (element.pttElement) return 'record';
   if (element.fileElement) return 'file';
   if (element.videoElement) return 'video';
-  if (element.multiForwardMsgElement || element.forwardElement) return 'forward';
+  // 08 真机实测：转发只有一个键 multiForwardMsgElement（elementType=16），没有 forwardElement。
+  if (element.multiForwardMsgElement) return 'forward';
   if (element.faceElement) return 'face';
   if (element.replyElement) return 'reply';
   return '';
