@@ -587,28 +587,32 @@ class NativeKernel {
         return '';
       }
     };
+    const asUin = (value) => {
+      const text = String(value ?? '');
+      return /^\d{5,12}$/.test(text) ? text : '';
+    };
     let uin = '';
     if (typeof session.getUixConvertService === 'function') {
-      uin = await attempt(async () => {
+      uin = asUin(await attempt(async () => {
         const data = await session.getUixConvertService().getUin([key]);
         const map = data && data.uinInfo;
         return map && typeof map.get === 'function' ? map.get(key) : '';
-      });
+      }));
     }
     if (!uin && typeof session.getProfileService === 'function') {
-      uin = await attempt(() => {
+      uin = asUin(await attempt(() => {
         const map = session.getProfileService().getUinByUid('FriendsServiceImpl', [key]);
         return map && typeof map.get === 'function' ? map.get(key) : '';
-      });
+      }));
     }
     if (!uin && typeof session.getGroupService === 'function') {
-      uin = await attempt(async () => {
+      uin = asUin(await attempt(async () => {
         const data = await session.getGroupService().getUinByUids([key]);
         const map = data && data.uins;
         return map && typeof map.get === 'function' ? map.get(key) : '';
-      });
+      }));
     }
-    const clean = /^\d{5,12}$/.test(uin) ? uin : '';
+    const clean = asUin(uin);
     if (clean) {
       this.uinByUid.set(key, clean);
       return clean;
