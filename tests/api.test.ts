@@ -198,8 +198,9 @@ test('事件与管理接口', async () => {
 
     const rotated = await instance.call('PUT', '/api/security/token', { token: 'brand-new-token-123' });
     assert.equal(rotated.status, 200);
-    const oldSessionStillValid = await instance.call('GET', '/api/status');
-    assert.equal(oldSessionStillValid.status, 200);
+    // 轮换后旧会话当场失效，必须用新令牌重新登录。
+    const staleSession = await instance.call('GET', '/api/status');
+    assert.equal(staleSession.status, 401);
     const fresh = await fetch(`${instance.base}/api/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

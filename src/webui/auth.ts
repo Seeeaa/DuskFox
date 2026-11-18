@@ -54,6 +54,11 @@ export class Sessions {
     this.#sessions.delete(token);
   }
 
+  /** 清空全部会话；轮换管理令牌后旧会话必须立即失效。 */
+  clear(): void {
+    this.#sessions.clear();
+  }
+
   /** Drop sessions that idled past the configured window. */
   purge(): void {
     const now = Date.now();
@@ -102,6 +107,11 @@ export class Tickets {
       return false;
     }
     return item.scope === scope;
+  }
+
+  /** 清空全部票据；轮换管理令牌后旧票据必须立即失效。 */
+  clear(): void {
+    this.#items.clear();
   }
 
   purge(): void {

@@ -245,6 +245,8 @@ test('语音：契约声明语音双向后，发送走 /api/send、get_record �
       features: { privateMessage: true, groupMessage: true, mediaRecord: true, mediaDownload: true },
       send_segments: ['text', 'record'],
       recv_segments: ['text', 'record'],
+      // 下载是独立方向：不声明它，get_record 会被正确拒绝。
+      download_segments: ['record'],
     },
     { base64: TINY_AMR.toString('base64'), name: 'voice.amr', size: TINY_AMR.length },
   );

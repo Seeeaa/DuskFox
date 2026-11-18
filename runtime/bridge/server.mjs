@@ -170,6 +170,11 @@ export function createBridgeServer(options) {
   /** 段能力的方向必须如实分开报告：能收语音不等于能发语音。 */
   const canSend = (kind) => Array.isArray(sendSegments) && sendSegments.includes(kind);
   const canRecv = (kind) => Array.isArray(recvSegments) && recvSegments.includes(kind);
+  // 第三个方向：哪些媒体能按消息 id 把字节取回来。没有 media() 就一个都没有。
+  const downloadSegments =
+    kernel && typeof kernel.media === 'function'
+      ? (Array.isArray(kernel.downloadSegments) ? kernel.downloadSegments : ['image', 'record'])
+      : [];
   const features = {
     privateMessage: true,
     groupMessage: true,
@@ -186,10 +191,12 @@ export function createBridgeServer(options) {
     requestHandle: typeof kernel.handleRequest === 'function',
     // 语音：入站由 pttElement 解析，出站需要客户端 RichMedia 路径接口。
     mediaRecord: canRecv('record') || canSend('record'),
-    mediaVideo: false,
-    mediaFile: false,
+    mediaVideo: canRecv('video') || canSend('video'),
+    mediaFile: canRecv('file') || canSend('file'),
+    // 合并转发：原生侧必须能展开节点、也能构造并发出，缺一不算支持。
+    mediaForward: canRecv('forward') || canSend('forward'),
     // 运行时能否按消息 id 取回媒体字节（OneBot get_record 的后端）。
-    mediaDownload: typeof kernel.media === 'function',
+    mediaDownload: downloadSegments.length > 0,
     passwordLogin: Boolean(kernel && kernel.passwordLoginEnabled),
     quickLogin: Boolean(kernel && kernel.quickLoginSupported),
     logout: false,
@@ -413,6 +420,8 @@ export function createBridgeServer(options) {
         instance,
         send_segments: sendSegments,
         recv_segments: recvSegments,
+        // 查询/下载是独立方向：能收不等于能把字节取回来。
+        download_segments: downloadSegments,
         // 能力可能随登录状态变化（登录服务晚于进程启动），这里按当前状态重算。
         features: {
           ...features,
@@ -586,7 +595,10 @@ export function createBridgeServer(options) {
         const media = await kernel.media(String(url.searchParams.get('message_id') ?? ''), kind);
         return send(200, media);
       } catch (error) {
-        return send(404, { error: error instanceof Error ? error.message : String(error) });
+        const detail = error instanceof Error ? error.message : String(error);
+        // 409 = 消息在、字节还没落盘（可重试）；404 = 查不到这条消息。
+        const notReady = detail.includes('尚未落到本地') || detail.includes('未落盘');
+        return send(notReady ? 409 : 404, { error: detail });
       }
     }
     if (url.pathname === '/api/quick-list' && request.method === 'GET') {

@@ -38,6 +38,8 @@ class NativeKernel {
     this.loginSucceeded = false;
     /** getMsfStatus(): 1=断开, 2=已连接。 */
     this.msfStatus = 0;
+    /** 最近一条真实入站消息的时间（毫秒），在线判据的活性来源。 */
+    this.lastMsgAt = 0;
     this.qrState = 'none';
     this.qrSeq = 0;
     this.lastReconnectAt = 0;
@@ -173,8 +175,10 @@ class NativeKernel {
     } catch (error) {
       // 待实机：该方法在部分版本不存在，保留上一次值。
     }
-    // 与 NapCat 一致：会话就绪即在线；MSF 只作为诊断字段，不再作为在线前提。
-    this.online = Boolean(this.loginSucceeded && this.msgService);
+    // 在线不能只看"对象存在"：会话在、MSF 掉线、又没有新消息，就是"显示在线但收不到"。
+    // 判据 = 已授权 + 消息服务在 + （MSF=2 或最近 5 分钟内有真实消息往来）。
+    const active = this.lastMsgAt > 0 && Date.now() - this.lastMsgAt < 5 * 60_000;
+    this.online = Boolean(this.loginSucceeded && this.msgService && (this.msfStatus === 2 || active));
   }
 
   get quickLoginSupported() {
@@ -278,6 +282,8 @@ class NativeKernel {
       online: this.online,
       authorized: this.loginSucceeded,
       msf: this.msfStatus,
+      // 控制台据此显示"最后一次收到消息"的时间，掉线时能一眼看出是网络问题。
+      lastMsgAt: this.lastMsgAt,
     };
   }
 
@@ -732,6 +738,8 @@ class NativeKernel {
 
   onNativeMessage(message) {
     if (!message || message.isImportMsg === true) return;
+    // 任何真实入站消息都是"消息连接还活着"的证据。
+    this.lastMsgAt = Date.now();
     const elements = Array.isArray(message.elements) ? message.elements : [];
     // 发送回显：QQ 会把自己刚发出去的消息再回调一次，但元素为空、senderUin=0。
     // 这种回声既解析不出内容，还会被框架当成新消息重复触发指令，直接丢弃。
@@ -1174,40 +1182,68 @@ class NativeKernel {
       : { chatType: CHAT_PRIVATE, peerUid: String(peerId), guildId: '' };
   }
 
-  /**
-   * sendMsg 只回 { result }，没有 msgId；发完立刻问会话首屏最新消息，用发送者+文本认出自己那条，
-   * 这样 OneBot 返回的 message_id 才能真用于撤回/引用。
-   */
-  async latestSentRecord(peer, textHint) {
+  /** 读会话首屏最近消息；兼容几种返回外壳。 */
+  async aioMessages(peer, count = 10) {
     const service = this.msgService;
     if (!service || typeof service.getAioFirstViewLatestMsgs !== 'function') return null;
+    let raw = null;
+    try {
+      raw = await withTimeout(service.getAioFirstViewLatestMsgs(peer, count), 1200, 'getAioFirstViewLatestMsgs');
+    } catch (error) {
+      this.probe.aioLatestError = String(error?.message || error);
+      return null;
+    }
+    return Array.isArray(raw)
+      ? raw
+      : Array.isArray(raw?.messages)
+        ? raw.messages
+        : Array.isArray(raw?.msgList)
+          ? raw.msgList
+          : Array.isArray(raw?.result)
+            ? raw.result
+            : Array.isArray(raw?.result?.messages)
+              ? raw.result.messages
+              : Array.isArray(raw?.result?.msgList)
+                ? raw.result.msgList
+                : null;
+  }
+
+  /** 发送前水位：当前会话首屏里自己发出的最大 msgSeq。 */
+  async selfSeqWatermark(peer) {
+    const list = await this.aioMessages(peer, 10);
+    if (!list || list.length === 0) return 0;
     const selfUin = String(this.uin || '');
-    const deadline = Date.now() + 1500;
+    let max = 0;
+    for (const item of list) {
+      const uin = String(item?.senderUin ?? '');
+      if (selfUin && uin && uin !== selfUin) continue;
+      const seq = Number(item?.msgSeq ?? 0);
+      if (seq > max) max = seq;
+    }
+    return max;
+  }
+
+  /**
+   * 发送回执：sendMsg 只回 { result }，没有 msgId。
+   * 发之前记下自己消息的 msgSeq 水位，发之后只认"比水位新、时间合理、段类型对得上"的那条，
+   * 不会把上一条消息的 id 当成本次回执。认不出来就返回 null，由调用方按失败上报。
+   * 【待实机验证】getAioFirstViewLatestMsgs 的返回字段与发送后可见时延。
+   */
+  async confirmSentMessage(peer, watermark, wantedKinds, textHint, startedAtSeconds) {
+    const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
-      let raw = null;
-      try {
-        raw = await withTimeout(service.getAioFirstViewLatestMsgs(peer, 10), 1200, 'getAioFirstViewLatestMsgs');
-      } catch (error) {
-        this.probe.aioLatestError = String(error?.message || error);
-        return null;
-      }
-      const list = Array.isArray(raw)
-        ? raw
-        : Array.isArray(raw?.messages)
-          ? raw.messages
-          : Array.isArray(raw?.msgList)
-            ? raw.msgList
-            : Array.isArray(raw?.result)
-              ? raw.result
-              : Array.isArray(raw?.result?.messages)
-                ? raw.result.messages
-                : Array.isArray(raw?.result?.msgList)
-                  ? raw.result.msgList
-                  : null;
+      const list = await this.aioMessages(peer, 20);
       if (list && list.length > 0) {
-        const hit = [...list].reverse().find((item) => {
+        const candidates = list.filter((item) => {
           if (!item || !item.msgId) return false;
-          if (selfUin && String(item.senderUin ?? '') && String(item.senderUin) !== selfUin) return false;
+          const seq = Number(item.msgSeq ?? 0);
+          if (watermark > 0 && seq > 0 && seq <= watermark) return false;
+          const seconds = Number(item.msgTime ?? 0);
+          if (seconds > 0 && startedAtSeconds > 0 && seconds < startedAtSeconds - 5) return false;
+          const kinds = new Set((Array.isArray(item.elements) ? item.elements : []).map(elementKind));
+          for (const kind of wantedKinds) {
+            if (!kinds.has(kind)) return false;
+          }
           if (textHint) {
             const text = (Array.isArray(item.elements) ? item.elements : [])
               .map((element) => String(element?.textElement?.content ?? ''))
@@ -1216,10 +1252,13 @@ class NativeKernel {
           }
           return true;
         });
-        if (hit) return hit;
+        if (candidates.length > 0) {
+          if (candidates.length > 1) this.probe.sendAmbiguous = candidates.length;
+          return candidates.sort((left, right) => Number(left.msgSeq ?? 0) - Number(right.msgSeq ?? 0)).pop() || null;
+        }
         this.probe.aioLatestKeys = Object.keys(list[0] || {}).slice(0, 16);
       }
-      await new Promise((resolve) => setTimeout(resolve, 180));
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
     return null;
   }
@@ -1244,7 +1283,8 @@ class NativeKernel {
       } else if (segment.type === 'image') {
         elements.push(await this.buildPicElement(String(segment.data?.file ?? segment.data?.url ?? '')));
       } else if (segment.type === 'record') {
-        elements.push(await this.buildPttElement(String(segment.data?.file ?? segment.data?.url ?? '')));
+        // 收到的语音只有 path（QQ 容器内落盘路径），回传时同样要能用。
+        elements.push(await this.buildPttElement(String(segment.data?.file ?? segment.data?.path ?? segment.data?.url ?? '')));
       } else if (segment.type === 'at') {
         elements.push(await this.buildAtElement(segment.data || {}, scene, peerId));
       } else if (segment.type === 'reply') {
@@ -1254,18 +1294,26 @@ class NativeKernel {
       }
     }
     const peer = { chatType: scene === 'group' ? CHAT_GROUP : CHAT_PRIVATE, peerUid, guildId: '' };
-    // 图片要先上传到腾讯 CDN：3MB 的图实测就能超过 12 秒，别把正常发送当超时掐掉。
-    const result = await withTimeout(this.msgService.sendMsg('0', peer, elements, new Map()), 120_000, 'sendMsg');
-    if (!result || result.result !== 0) throw new Error('sendMsg 返回 ' + JSON.stringify(result));
-    this.probe.sendResultKeys = Object.keys(result).slice(0, 12);
+    const startedAtSeconds = Math.floor(Date.now() / 1000);
+    // 认回执时要比对段类型：纯图片/语音/文件消息没有文本可以匹配。
+    const wantedKinds = [...new Set(elements.map(elementKind))].filter((kind) => kind && kind !== 'reply');
     const textHint = segments
       .filter((segment) => segment?.type === 'text')
       .map((segment) => String(segment?.data?.text ?? ''))
       .join('');
-    const record = await this.latestSentRecord(peer, textHint).catch(() => null);
-    let messageId = String(result.msgId || result.msgSeq || '');
+    // 发送前水位：拿不到就当 0（只按时间和段类型匹配），绝不伪造 id。
+    const watermark = await this.selfSeqWatermark(peer).catch(() => 0);
+    // 图片要先上传到腾讯 CDN：3MB 的图实测就能超过 12 秒，别把正常发送当超时掐掉。
+    const result = await withTimeout(this.msgService.sendMsg('0', peer, elements, new Map()), 120_000, 'sendMsg');
+    if (!result || result.result !== 0) throw new Error('sendMsg 返回 ' + JSON.stringify(result));
+    this.probe.sendResultKeys = Object.keys(result).slice(0, 12);
+    const record = await this.confirmSentMessage(peer, watermark, wantedKinds, textHint, startedAtSeconds).catch(() => null);
+    const messageId = String((record && record.msgId) || result.msgId || '');
+    if (!messageId) {
+      // 结果不明时不能伪造一个 message_id：撤回/引用都会指错，调用方还会以为成功。
+      throw new Error('消息已提交客户端，但未能确认回执 msgId；为避免伪造 message_id，本次按失败上报（消息可能已送达）');
+    }
     if (record) {
-      messageId = String(record.msgId);
       const meta = {
         msgId: messageId,
         msgSeq: String(record.msgSeq ?? ''),
@@ -1279,7 +1327,6 @@ class NativeKernel {
       this.metaByMsgId.set(messageId, meta);
       this.scheduleMetaFlush();
     }
-    if (!messageId || messageId === 'undefined') messageId = String(Date.now());
     this.peerByMsgId.set(messageId, peer);
     this.peerByMsgId.set('last:' + scene + ':' + String(peerId), peer);
     return { messageId };
@@ -1769,6 +1816,20 @@ function withTimeout(promise, ms, label) {
 
 function peerKey(groupId, uin) {
   return String(groupId) + '|' + String(uin);
+}
+
+/** 原生消息元素 -> 段类型名；认发送回执时用来比对"这条到底是不是刚发的那种消息"。 */
+function elementKind(element) {
+  if (!element) return '';
+  if (element.textElement) return 'text';
+  if (element.picElement) return 'image';
+  if (element.pttElement) return 'record';
+  if (element.fileElement) return 'file';
+  if (element.videoElement) return 'video';
+  if (element.multiForwardMsgElement || element.forwardElement) return 'forward';
+  if (element.faceElement) return 'face';
+  if (element.replyElement) return 'reply';
+  return '';
 }
 
 function logoutMarkerPath() {

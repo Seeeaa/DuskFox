@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import os from 'node:os';
 import type { AccountDriver, Capabilities, DriverContext, DriverOptions, SendResult } from './types.ts';
-import { capabilityMap } from './types.ts';
+import { capabilityMap, downloadCapabilities, segmentCapabilities } from './types.ts';
 import type {
   AccountNotice,
   AccountRequest,
@@ -49,14 +49,10 @@ export class MockDriver implements AccountDriver {
   readonly capabilities: Capabilities = capabilityMap({
     privateMessage: true,
     groupMessage: true,
-    mediaImage: true,
-    mediaRecord: true,
-    mediaVideo: true,
-    mediaFile: true,
-    reply: true,
-    at: true,
-    face: true,
-    json: true,
+    send: segmentCapabilities(['text', 'image', 'record', 'video', 'file', 'forward', 'at', 'reply', 'face', 'json']),
+    recv: segmentCapabilities(['text', 'image', 'record', 'video', 'file', 'forward', 'at', 'reply', 'face']),
+    // 模拟账号没有真实媒体字节，下载方向一律不声明。
+    download: downloadCapabilities([]),
     recall: true,
     friendList: true,
     groupList: true,
