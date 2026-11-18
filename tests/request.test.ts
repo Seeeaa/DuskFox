@@ -169,6 +169,22 @@ test('原生好友申请：UixConvert 能换号时填真实 QQ 号', async () =>
   assert.equal(emitted[0]?.request.user.uid, 'u_aBcD1234efGh');
 });
 
+test('原生好友申请：换号服务返回 0 时继续尝试 Profile', async () => {
+  let profileCalls = 0;
+  const { kernel, emitted } = nativeProbe({
+    getUixConvertService: () => ({ getUin: async () => ({ uinInfo: new Map([['u_fallback', '0']]) }) }),
+    getProfileService: () => ({
+      getUinByUid: () => {
+        profileCalls += 1;
+        return new Map([['u_fallback', '20009']]);
+      },
+    }),
+  });
+  await kernel.handleBuddyRequests({ buddyReqs: [{ friendUid: 'u_fallback', reqTime: '1795000000' }] });
+  assert.equal(emitted[0]?.request.user.id, '20009');
+  assert.equal(profileCalls, 1);
+});
+
 test('原生好友申请：自己发起、已处理、已读的请求不上报', async () => {
   const { kernel, emitted } = nativeProbe();
   await kernel.handleBuddyRequests({
