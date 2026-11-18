@@ -68,6 +68,8 @@ class NativeKernel {
     this.peerByMsgId = new Map();
     /** msgId -> 原生元信息（msgSeq/msgTime/sender）：构造引用回复时必须回填这些字段。 */
     this.metaByMsgId = new Map();
+    /** resId -> { nativeId, chatType, peerUid }：收到转发时记下，保证按 resId 也能展开。 */
+    this.forwardOwners = new Map();
     /** el:<elementId> / msg:<msgId> -> RichMedia 落盘路径：语音/图片下载完成时记下。 */
     this.mediaPaths = new Map();
     /** 等 RichMedia 下载完成的回调（同一个 key 可能有多路等待）。 */
@@ -114,14 +116,17 @@ class NativeKernel {
     // 语音出站同样依赖 RichMedia 复制，未实机确认前默认不对外声明；
     // 设 QQ_BRIDGE_RECORD_SEND=1 再打开。入站解析（pttElement）始终可用。
     const recordSend = process.env.QQ_BRIDGE_RECORD_SEND === '1';
+    // 文件/视频出站默认关闭，需实机验证后再打开。
+    const fileSend = process.env.QQ_BRIDGE_FILE_SEND === '1';
+    const videoSend = process.env.QQ_BRIDGE_VIDEO_SEND === '1';
     this.sendSegments = [
       'text',
       ...(mediaSend ? ['image'] : []),
       ...(recordSend ? ['record'] : []),
-      // 文件/视频走与图片相同的 RichMedia 复制路径，代码已实现；
-      // 客户端不提供 getRichMediaFilePathForGuild 时发送会明确报错。
-      'file',
-      'video',
+      // 文件/视频出站：构造代码已实现，但 Send 变体/缩略图/fileFormat/群文件是否必须走
+      // uploadGroupFile 均未实机验证（审查报告 C），**默认关闭**，与 image/record 同口径。
+      ...(fileSend ? ['file'] : []),
+      ...(videoSend ? ['video'] : []),
       'at',
       'reply',
     ];
@@ -174,8 +179,8 @@ class NativeKernel {
 
   refreshMsf() {
     try {
-      if (!this.loginService) return;
-      const value = this.loginService.getMsfStatus();
+      // 注意：这里不能 early return，否则下面的在线判定永远不会执行（曾导致 status().online 恒 false）。
+      const value = this.loginService ? this.loginService.getMsfStatus() : undefined;
       if (typeof value === 'number') {
         this.msfStatus = value;
         this.probe.msfStatus = value;
@@ -183,10 +188,10 @@ class NativeKernel {
     } catch (error) {
       // 待实机：该方法在部分版本不存在，保留上一次值。
     }
-    // 在线不能只看"对象存在"：会话在、MSF 掉线、又没有新消息，就是"显示在线但收不到"。
-    // 判据 = 已授权 + 消息服务在 + （MSF=2 或最近 5 分钟内有真实消息往来）。
-    const active = this.lastMsgAt > 0 && Date.now() - this.lastMsgAt < 5 * 60_000;
-    this.online = Boolean(this.loginSucceeded && this.msgService && (this.msfStatus === 2 || active));
+    // 可用性判据：已授权 + 消息服务在。**空闲不是掉线**。
+    // 审查报告 F：线上 1.0.5 在正常收发时 msf_status 也常为 1；若把"最近 5 分钟没消息"
+    // 当离线，空闲 5 分钟后所有发送都会被 1404 拒绝。活跃度单独用 idleMs 暴露，不参与判定。
+    this.online = Boolean(this.loginSucceeded && this.msgService);
   }
 
   get quickLoginSupported() {
@@ -290,7 +295,8 @@ class NativeKernel {
       online: this.online,
       authorized: this.loginSucceeded,
       msf: this.msfStatus,
-      // 控制台据此显示"最后一次收到消息"的时间，掉线时能一眼看出是网络问题。
+      // 空闲时长单独暴露，只供控制台显示，不作为在线判据。
+      idleMs: this.lastMsgAt > 0 ? Date.now() - this.lastMsgAt : 0,
       lastMsgAt: this.lastMsgAt,
     };
   }
@@ -749,6 +755,18 @@ class NativeKernel {
     // 任何真实入站消息都是"消息连接还活着"的证据。
     this.lastMsgAt = Date.now();
     const elements = Array.isArray(message.elements) ? message.elements : [];
+    // 转发消息只带 resId（08 实测），先记下 resId 与所属消息/peer 的关系，
+    // 否则 OneBot 用 resId 当 id 来查时会因为 getMessage(resId) 查不到而拿到空 peer。
+    for (const element of elements) {
+      const forward = element && element.multiForwardMsgElement;
+      if (!forward || !forward.resId) continue;
+      this.forwardOwners.set(String(forward.resId), {
+        nativeId: String(message.msgId ?? ''),
+        chatType: Number(message.chatType ?? 0),
+        peerUid: String(message.peerUid ?? ''),
+        at: Date.now(),
+      });
+    }
     // 发送回显：QQ 会把自己刚发出去的消息再回调一次，但元素为空、senderUin=0。
     // 这种回声既解析不出内容，还会被框架当成新消息重复触发指令，直接丢弃。
     if (elements.length === 0) return;
@@ -1077,7 +1095,17 @@ class NativeKernel {
       throw new Error('客户端未提供 getMultiMsg，合并转发展开待实机验证');
     }
     const key = String(msgId ?? '');
-    const owner = (await this.getMessage(key).catch(() => null)) || {};
+    // OneBot 规范用转发段 id（= resId）查询，而 resId 不是 msgId：
+    // 先用 getMessage 查消息，查不到就查收到转发时记下的 resId -> 所属消息/peer 关系。
+    let owner = (await this.getMessage(key).catch(() => null)) || {};
+    let targetId = String(owner.msgId || key);
+    if (!owner.msgId) {
+      const cached = this.forwardOwners.get(key);
+      if (cached) {
+        targetId = String(cached.nativeId || key);
+        owner = { chatType: cached.chatType, peerUid: cached.peerUid };
+      }
+    }
     const peer = owner.parentMsgPeer || {
       chatType: Number(owner.chatType ?? CHAT_PRIVATE),
       guildId: '',
@@ -1085,11 +1113,14 @@ class NativeKernel {
     };
     // 08 真机探针未见 parentMsgPeer / parentMsgIdList（受 24 键上限影响，未断言不存在），
     // 所以这里两条路都留：有就用，没有就用当前消息的 chatType/peerUid 组 peer，最外层 id 退回自身 msgId。
-    const outermost = String((Array.isArray(owner.parentMsgIdList) && owner.parentMsgIdList[0]) || key);
-    const raw = await withTimeout(service.getMultiMsg(peer, outermost, key), 5000, 'getMultiMsg');
+    const outermost = String((Array.isArray(owner.parentMsgIdList) && owner.parentMsgIdList[0]) || targetId);
+    const raw = await withTimeout(service.getMultiMsg(peer, outermost, targetId), 5000, 'getMultiMsg');
     // 返回结构未实测（08 报告第六节）；只接受明确的列表外壳，认不出就返回 null，
     // 由上层报"无法展开"，绝不把整个 raw 对象当节点数组。
-    const list = Array.isArray(raw) ? raw : raw && (raw.msgList || raw.messages);
+    // 接受数组 / msgList / messages / result.msgList / result.messages 四种外壳（与 aioMessages 对齐）。
+    const list = Array.isArray(raw)
+      ? raw
+      : raw && (raw.msgList || raw.messages || (raw.result && (raw.result.msgList || raw.result.messages)));
     this.probe.forwardOwnerKeys = Object.keys(owner).slice(0, 24);
     this.probe.forwardHadParentPeer = Boolean(owner.parentMsgPeer);
     this.probe.forwardRawKeys = raw && typeof raw === 'object' ? Object.keys(raw).slice(0, 12) : String(typeof raw);
@@ -1364,7 +1395,8 @@ class NativeKernel {
     const messageId = String((record && record.msgId) || result.msgId || '');
     if (!messageId) {
       // 结果不明时不能伪造一个 message_id：撤回/引用都会指错，调用方还会以为成功。
-      throw new Error('消息已提交客户端，但未能确认回执 msgId；为避免伪造 message_id，本次按失败上报（消息可能已送达）');
+      // 结果未知 ≠ 失败：消息可能已送达，框架自动重试会造成重复发送，所以给可识别前缀。
+      throw new Error('SEND_RESULT_UNKNOWN: 消息已提交客户端但未确认回执 msgId，结果未知（不要自动重试）');
     }
     if (record) {
       const meta = {

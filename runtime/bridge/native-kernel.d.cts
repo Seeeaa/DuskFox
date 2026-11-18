@@ -15,6 +15,20 @@ export declare class NativeKernel {
   resolveUin(uid: string): Promise<string>;
   uinOfUid(uid: string): string;
   msgService: any;
+  lastMsgAt: number;
+  loginSucceeded: boolean;
+  status(): {
+    online: boolean;
+    authorized: boolean;
+    msf: number;
+    idleMs: number;
+    lastMsgAt: number;
+    uin: string;
+    nick: string;
+    avatar: string;
+    loginAt: number;
+  };
+  onNativeMessage(message: unknown): void;
   getMessage(msgId: string): Promise<any>;
   /** 文件/视频出站：RichMedia 复制 + 元素构造。 */
   buildFileElement(rawFile: string, rawName?: string): Promise<any>;

@@ -94,7 +94,21 @@ async function send(scene: Scene, peerId: number, params: SendParams, context: A
     segments,
     ...(replyTarget(segments) ? { replyTo: replyTarget(segments) } : {}),
   };
-  const result = await context.driver.sendMessage(outbound);
+  let result: { messageId: string };
+  try {
+    result = await context.driver.sendMessage(outbound);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (detail.includes('SEND_RESULT_UNKNOWN')) {
+      // 明确告知"结果未知"，并写进日志便于 08 对照真实投递。
+      context.logger.warn('onebot', '发送结果未知：' + detail);
+      throw new ActionError(
+        '发送结果未知：消息可能已送达，但未取得可引用的 message_id；请勿自动重试以免重复发送',
+        RETCODE.server,
+      );
+    }
+    throw error;
+  }
   context.logger.info(
     'onebot',
     '发 ' + (scene === 'group' ? '群 ' + peerId : '私聊 ' + peerId) +
@@ -125,20 +139,28 @@ function checkSegments(segments: readonly Segment[], scene: Scene, context: Acti
     return new ActionError('当前驱动不支持私聊消息', RETCODE.unsupported);
   }
   if (segments.length === 0) return new ActionError('消息不能为空', RETCODE.badParam);
-  const needs: Array<[Segment['type'], keyof typeof context.driver.capabilities, string]> = [
-    ['image', 'mediaImage', '图片'],
-    ['record', 'mediaRecord', '语音'],
-    ['video', 'mediaVideo', '视频'],
-    ['file', 'mediaFile', '文件'],
-    ['at', 'at', '@ 提及'],
-    ['face', 'face', '表情'],
-    ['forward', 'forward', '合并转发'],
-    ['json', 'json', 'JSON 卡片'],
-    ['markdown', 'markdown', 'Markdown'],
-  ];
-  for (const [type, capability, label] of needs) {
-    if (segments.some((segment) => segment.type === type) && !context.driver.capabilities[capability]) {
-      return new ActionError(`当前驱动不支持${label}消息段`, RETCODE.unsupported);
+  // 出站只看 send 方向：以前读 mediaImage 等"双向"兼容位（= send && recv），
+  // "能发不能收"的驱动会被错误拒绝。
+  const send = context.driver.capabilities.send;
+  const labels: Record<string, string> = {
+    image: '图片',
+    record: '语音',
+    video: '视频',
+    file: '文件',
+    at: '@ 提及',
+    face: '表情',
+    forward: '合并转发',
+    json: 'JSON 卡片',
+    markdown: 'Markdown',
+  };
+  for (const segment of segments) {
+    if (segment.type === 'text' || segment.type === 'reply') continue;
+    // 未知段必须在动作层就拒绝成 1200，不能指望驱动逐个内核去报（审查报告 H）。
+    if (segment.type === 'unknown') {
+      return new ActionError(`不支持的消息段类型：${segment.kind}`, RETCODE.unsupported);
+    }
+    if (!send[segment.type]) {
+      return new ActionError(`当前驱动不支持发送${labels[segment.type] ?? segment.type}消息段`, RETCODE.unsupported);
     }
   }
   return null;
@@ -305,7 +327,6 @@ export const messageActions: Array<ActionDefinition<any, any>> = [
   {
     name: 'get_forward_msg',
     description: '按消息 ID 展开合并转发节点',
-    requires: ['mediaDownload'],
     params: Type.Object({
       message_id: Type.Optional(MessageIdSchema),
       // 也允许直接用合并转发段的 id（部分框架就是这么调的）。

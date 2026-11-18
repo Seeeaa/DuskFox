@@ -586,6 +586,11 @@ export function createBridgeServer(options) {
         return send(200, { message_id: sent.messageId });
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
+        // 消息可能已送达、只是拿不到回执：这不是普通失败，必须让调用方知道别自动重试。
+        if (detail.includes('SEND_RESULT_UNKNOWN')) {
+          logger.warn?.('[bridge] send ' + scene + ' peer=' + peerId + ' 结果未知：' + detail);
+          return send(202, { ok: false, unknown: true, error: detail.replace('SEND_RESULT_UNKNOWN: ', '') });
+        }
         console.error('[bridge] send failed', detail, '\n', error instanceof Error ? error.stack : '');
         logger.warn?.('[bridge] send ' + scene + ' peer=' + peerId + ' 失败：' + detail);
         return send(502, { error: '原生发送失败：' + detail });
@@ -642,10 +647,12 @@ export function createBridgeServer(options) {
     }
 
     if (url.pathname === '/api/forward' && request.method === 'GET') {
-      if (typeof kernel.getForward !== 'function') return send(501, { error: '运行时未实现合并转发展开' });
+      if (typeof kernel.getForward !== 'function') {
+        return send(501, { error: '运行时未实现合并转发展开（缺少 getMultiMsg）' });
+      }
       try {
         const nodes = await kernel.getForward(String(url.searchParams.get('message_id') ?? ''));
-        if (!nodes) return send(404, { error: '合并转发不存在或已失效' });
+        if (!nodes) return send(404, { error: '合并转发不存在、已失效，或getMultiMsg 返回结构与预期不符' });
         // 原生给的是 RawMessage，这里统一转成 OneBot 节点；已是 OneBot 形状的原样放行。
         const content = nodes.map((node) => {
           if (node && Array.isArray(node.message)) return node;
@@ -659,13 +666,22 @@ export function createBridgeServer(options) {
         });
         return send(200, { content });
       } catch (error) {
-        return send(404, { error: error instanceof Error ? error.message : String(error) });
+        const detail = error instanceof Error ? error.message : String(error);
+        // 能力缺失/超时用 501/504，和"确实不存在"(404) 分开，08 排查时不会被误导。
+        if (detail.includes('getMultiMsg')) return send(501, { error: detail });
+        if (detail.includes('超时')) return send(504, { error: detail });
+        return send(404, { error: detail });
       }
     }
     if (url.pathname === '/api/media' && request.method === 'GET') {
       if (typeof kernel.media !== 'function') return send(501, { error: '运行时未实现媒体下载' });
-      const requested = String(url.searchParams.get('kind') ?? '');
-      const kind = ['image', 'record', 'file', 'video'].includes(requested) ? requested : 'image';
+      const requested = String(url.searchParams.get('kind') ?? 'image');
+      // 未知 kind 必须明确报错：以前"非 record 即 image"会让 file/video 报"该消息不包含图片"，
+      // 把"不支持"伪装成"消息里没有图片"（08 报告第 53/85 条要求禁止这种降级）。
+      if (!['image', 'record', 'file', 'video'].includes(requested)) {
+        return send(400, { error: '未知的媒体类型 kind=' + requested + '（只支持 image|record|file|video）' });
+      }
+      const kind = requested;
       try {
         const media = await kernel.media(String(url.searchParams.get('message_id') ?? ''), kind);
         return send(200, media);

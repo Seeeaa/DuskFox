@@ -122,6 +122,39 @@ test('原生合并转发展开：返回结构认不出时返回 null，不把 ra
   assert.equal(await kernel.getForward('x'), null);
 });
 
+test('原生在线判据：已授权 + 消息服务在即在线，空闲 6 分钟不算掉线', () => {
+  const { kernel } = probe({});
+  kernel.uin = '10001';
+  (kernel as any).loginSucceeded = true;
+  kernel.msgService = {};
+  kernel.lastMsgAt = Date.now() - 6 * 60_000;
+  const status = kernel.status();
+  assert.equal(status.online, true, '空闲不等于掉线，否则所有发送会被 1404 拒绝');
+  assert.ok(status.idleMs >= 5 * 60_000, '空闲时长要单独暴露给控制台');
+});
+
+test('原生转发展开：按 resId 查询时用缓存的所属消息与 peer', async () => {
+  const calls: any[] = [];
+  const { kernel } = probe({
+    getMultiMsg: async (...args: any[]) => {
+      calls.push(args);
+      return { result: { msgList: [{ msgId: 'inner-1' }] } };
+    },
+  });
+  kernel.getMessage = async () => null;
+  kernel.onNativeMessage({
+    msgId: 'owner-msg',
+    chatType: 2,
+    peerUid: '30001',
+    elements: [{ elementType: 16, multiForwardMsgElement: { resId: 'res-cache', xmlContent: '', fileName: '摘要' } }],
+  });
+  const nodes = await kernel.getForward('res-cache');
+  assert.ok(nodes, 'resId 应能通过缓存展开');
+  assert.equal(nodes.length, 1);
+  assert.deepEqual(calls[0][0], { chatType: 2, guildId: '', peerUid: '30001' });
+  assert.equal(calls[0][2], 'owner-msg', '要用所属消息的 msgId 去展开');
+});
+
 test('原生合并转发展开：客户端没有 getMultiMsg 时必须报错而不是返回空节点', async () => {
   const { kernel } = probe({});
   await assert.rejects(() => kernel.getForward('any'), /getMultiMsg/);

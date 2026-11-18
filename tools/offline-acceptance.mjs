@@ -147,8 +147,14 @@ async function main() {
     );
     const caps = Object.fromEntries(status.json.capabilities.map((row) => [row.key, row.state]));
     // 媒体位按真实子能力报告：只有图片时必须是 partial，而不是假装全支持。
-    record('能力位来自运行时契约（群/图片/查询/请求）',
-      caps.group === 'yes' && caps.media === 'partial' && caps.query === 'yes' && caps.requests === 'yes',
+    // 能力位按三个方向分别声明：媒体行不再是"全支持=yes/部分=partial"的粗粒度判断。
+    record('能力位来自运行时契约（群/发送/接收/下载/查询/请求）',
+      caps.group === 'yes' &&
+        caps['media-send'] === 'yes' &&
+        caps['media-recv'] === 'yes' &&
+        caps['media-download'] === 'yes' &&
+        caps.query === 'yes' &&
+        caps.requests === 'yes',
       JSON.stringify(caps));
 
     // ------------------------------------------------------------ 二维码状态

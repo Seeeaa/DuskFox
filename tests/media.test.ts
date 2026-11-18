@@ -26,6 +26,38 @@ async function bootPair() {
   return { runtime, instance };
 }
 
+test('未知媒体类型：kind=forward 明确 400，不降级成图片', async () => {
+  const { runtime, instance } = await bootPair();
+  try {
+    const response = await fetch(runtime.base + '/api/media?message_id=x&kind=forward', {
+      headers: { authorization: 'Bearer runtime-token' },
+    });
+    assert.equal(response.status, 400);
+    const body = await response.json() as { error: string };
+    assert.match(body.error, /未知的媒体类型/);
+    // 顺带确认框架侧动作也在
+    assert.ok(instance);
+  } finally {
+    await instance.stop();
+    await runtime.close();
+  }
+});
+
+test('未知消息段：出站直接 1200，不降级成文本也不落到驱动', async () => {
+  const { runtime, instance } = await bootPair();
+  try {
+    const sent = await instance.call('POST', '/api/action/send_private_msg', {
+      user_id: 20001,
+      message: [{ type: 'mface', data: { summary: '[动画表情]' } }],
+    });
+    assert.equal(sent.json.retcode, 1200);
+    assert.equal((runtime.kernel.sent as unknown[]).length, 0, '不应把未知段交给运行时');
+  } finally {
+    await instance.stop();
+    await runtime.close();
+  }
+});
+
 test('入站按 elementType 判别：3=文件 / 5=视频 / 16=转发（08 真机字段）', () => {
   const file = toOb11Segments({ elements: [{ elementType: 3, fileElement: { fileName: 'a.pdf', filePath: '/qq/a.pdf', fileSize: '12' } }] });
   assert.equal(file[0]?.type, 'file');
