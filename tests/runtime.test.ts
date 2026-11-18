@@ -179,6 +179,31 @@ test('二维码：过期后变为 expired，刷新得到新序号', async () => 
   }
 });
 
+test('在线状态下手动重新取码仍返回二维码图片', async () => {
+  const { runtime, instance } = await bootPair();
+  try {
+    const originalStatus = runtime.kernel.status.bind(runtime.kernel);
+    runtime.kernel.status = () => ({ ...originalStatus(), authorized: true });
+    const refreshed = await instance.call('POST', '/api/qr/refresh?force=1');
+    assert.equal(refreshed.status, 200);
+    assert.equal(refreshed.json.state, 'waiting');
+    assert.match(refreshed.json.image, /^data:image\/png;base64,/);
+    assert.equal((await instance.call('GET', '/api/status')).json.account.online, true);
+    const retained = await instance.call('GET', '/api/qr');
+    assert.equal(retained.json.state, 'waiting');
+    assert.equal(retained.json.seq, refreshed.json.seq);
+    (runtime.kernel as SimKernel & { online: boolean }).online = false;
+    const authorizedOffline = await fetch(runtime.base + '/api/qr', {
+      headers: { authorization: 'Bearer runtime-token' },
+    }).then((response) => response.json() as Promise<{ state: string; picture?: string }>);
+    assert.equal(authorizedOffline.state, 'waiting');
+    assert.equal(typeof authorizedOffline.picture, 'string');
+  } finally {
+    await instance.stop();
+    await runtime.close();
+  }
+});
+
 test('运行时故障与恢复：错误状态可见，恢复后自动重新在线', async () => {
   const { runtime, instance } = await bootPair();
   try {

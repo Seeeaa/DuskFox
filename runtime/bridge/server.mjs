@@ -429,7 +429,7 @@ export function createBridgeServer(options) {
 
     if (url.pathname === '/api/qr' && request.method === 'GET') {
       const live = kernel.status();
-      if (live.authorized && !live.online) {
+      if (live.authorized && !live.online && !kernel.currentQr()?.picture) {
         return send(200, {
           state: 'none',
           seq: kernel.qrSeq ?? 0,
@@ -474,7 +474,7 @@ export function createBridgeServer(options) {
     }
 
     if (url.pathname === '/api/qr/refresh' && request.method === 'POST') {
-      if (kernel.status().authorized) return send(409, { error: '账号已授权，无需刷新二维码；等待消息网络连接' });
+      if (kernel.status().authorized && url.searchParams.get('force') !== '1') return send(409, { error: '账号已授权；如设备已被下线，请在账号页手动选择重新取码' });
       if (!pumpEnabled) return send(409, { error: '被动模式：请在 QQ 窗口刷新二维码' });
       try {
         const accepted = await kernel.requestQr();

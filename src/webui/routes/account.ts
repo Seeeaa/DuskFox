@@ -10,9 +10,9 @@ export function registerAccountRoutes(router: Router, context: WebuiContext): vo
     sendJson(res, 200, { ...qr, mock: context.driver.id === 'mock' });
   });
 
-  router.post('/api/qr/refresh', async ({ res }) => {
+  router.post('/api/qr/refresh', async ({ res, url }) => {
     if (!context.driver.capabilities.qrLogin) throw new HttpError(501, '当前驱动不支持扫码登录');
-    const qr = await context.driver.refreshQr();
+    const qr = await context.driver.refreshQr(url.searchParams.get('force') === '1');
     context.stream.send('qr', { ...qr, mock: context.driver.id === 'mock' });
     context.logger.info('webui', '控制台请求刷新二维码');
     sendJson(res, 200, { ...qr, mock: context.driver.id === 'mock' });
