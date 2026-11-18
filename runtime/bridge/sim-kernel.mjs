@@ -332,6 +332,32 @@ export class SimKernel {
     this.emit({ type: 'message', native });
   }
 
+  /**
+   * Test hook: push a friend/group request with the exact shape native-kernel emits
+   * (`{ type: 'request', request: { kind, time, scene, peer, user, comment, flag, detail } }`).
+   * Returns the flag a bot would echo back to set_friend_add_request / set_group_add_request.
+   */
+  request({ kind = 'friend', userId, groupId, comment = '', subType = 'add', flag, time = Date.now() } = {}) {
+    const type = kind === 'group' ? 'group' : 'friend';
+    const user = String(userId ?? (type === 'group' ? '20010' : '20009'));
+    const group = String(groupId ?? '30001');
+    const finalFlag = String(flag ?? type + '|' + user + '|' + Math.floor(time / 1000));
+    this.emit({
+      type: 'request',
+      request: {
+        kind: type,
+        time: Math.floor(time / 1000),
+        scene: type === 'group' ? 'group' : 'private',
+        peer: { id: type === 'group' ? group : user },
+        user: { id: user },
+        comment: String(comment),
+        flag: finalFlag,
+        ...(type === 'group' ? { detail: { sub_type: subType } } : {}),
+      },
+    });
+    return finalFlag;
+  }
+
   /** Simulated media fetch behind /api/media (image or voice). */
   async media(msgId, kind) {
     const msg = this.messages.get(String(msgId));

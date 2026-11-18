@@ -261,6 +261,39 @@ async function main() {
       JSON.stringify(voiceSegment),
     );
 
+    // ------------------------------------------------------------ request 事件（P0-1 回归）
+    const friendRequest = await runtimeApi('POST', '/sim/request', {
+      kind: 'friend',
+      userId: '20009',
+      comment: '离线验收好友申请',
+    });
+    const friendRequestFrame = await waitFor('好友申请入站', () => {
+      const hit = botFrames.find((f) => f.post_type === 'request' && f.request_type === 'friend');
+      return hit ?? null;
+    }, 12_000);
+    record(
+      '请求事件：好友申请经模拟内核 → OneBot 事件',
+      friendRequestFrame.user_id === 20009 && friendRequestFrame.flag === friendRequest.flag,
+      JSON.stringify({ request_type: friendRequestFrame.request_type, user_id: friendRequestFrame.user_id }),
+    );
+
+    const groupRequest = await runtimeApi('POST', '/sim/request', {
+      kind: 'group',
+      groupId: '30001',
+      userId: '20010',
+      comment: '离线验收加群申请',
+      subType: 'add',
+    });
+    const groupRequestFrame = await waitFor('加群申请入站', () => {
+      const hit = botFrames.find((f) => f.post_type === 'request' && f.request_type === 'group');
+      return hit ?? null;
+    }, 12_000);
+    record(
+      '请求事件：加群申请带 group_id 与 sub_type',
+      groupRequestFrame.group_id === 30001 && groupRequestFrame.sub_type === 'add' && groupRequestFrame.flag === groupRequest.flag,
+      JSON.stringify({ group_id: groupRequestFrame.group_id, sub_type: groupRequestFrame.sub_type }),
+    );
+
     // ------------------------------------------------------------ 独立 OneBot HTTP 动作
     const h = { 'content-type': 'application/json' };
     const httpVersion = await fetch(conns.http + '/get_version_info', { headers: h });
@@ -303,6 +336,21 @@ async function main() {
         gotRecordBytes.toString('latin1', 0, 6) === '#!AMR\n' &&
         /^voice[^\\/]*\.amr$/.test(String(gotRecordJson.data?.file_name ?? '')),
       'name=' + String(gotRecordJson.data?.file_name ?? '') + ' bytes=' + gotRecordBytes.length,
+    );
+
+    // 处理动作必须真的回到运行时（/sim/state 的 requests 计数增加），而不只是返回 status=ok。
+    const beforeRequests = (await runtimeApi('GET', '/sim/state')).requests;
+    const approveRequest = await fetch(conns.http + '/set_friend_add_request', {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({ flag: friendRequest.flag, approve: true }),
+    });
+    const approveJson = await approveRequest.json();
+    const afterRequests = (await runtimeApi('GET', '/sim/state')).requests;
+    record(
+      'OneBot HTTP：set_friend_add_request 回到运行时',
+      approveJson.status === 'ok' && afterRequests === beforeRequests + 1,
+      'requests ' + beforeRequests + ' -> ' + afterRequests,
     );
 
     // ------------------------------------------------------------ WS 动作 + 控制台调试

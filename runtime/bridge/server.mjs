@@ -181,7 +181,9 @@ export function createBridgeServer(options) {
     groupMemberInfo: true,
     groupMemberList: true,
     messageQuery: true,
-    requestHandle: true,
+    // 处理动作的能力要跟内核真实实现走：收得到申请和批不批是两件事，
+    // 事件永远照传，能力位只决定 set_*_add_request 能不能用。
+    requestHandle: typeof kernel.handleRequest === 'function',
     // 语音：入站由 pttElement 解析，出站需要客户端 RichMedia 路径接口。
     mediaRecord: canRecv('record') || canSend('record'),
     mediaVideo: false,
@@ -611,6 +613,10 @@ export function createBridgeServer(options) {
         kernel.incoming(JSON.parse(bodyText || '{}'));
         return send(200, { cursor });
       }
+      if (url.pathname === '/sim/request' && request.method === 'POST') {
+        const flag = kernel.request(JSON.parse(bodyText || '{}'));
+        return send(200, { cursor, flag });
+      }
       if (url.pathname === '/sim/backlog' && request.method === 'POST') {
         const body = JSON.parse(bodyText || '{}');
         const count = Math.max(1, Math.min(Number(body.count ?? 0), 900));
@@ -646,7 +652,14 @@ export function createBridgeServer(options) {
         return send(200, { ok: true });
       }
       if (url.pathname === '/sim/state' && request.method === 'GET') {
-        return send(200, { phase: computePhase(), cursor, ring: ring.length, sent: kernel.sent.length, qr: currentQrPayload() });
+        return send(200, {
+          phase: computePhase(),
+          cursor,
+          ring: ring.length,
+          sent: kernel.sent.length,
+          requests: Array.isArray(kernel.requests) ? kernel.requests.length : 0,
+          qr: currentQrPayload(),
+        });
       }
     }
 
@@ -697,7 +710,11 @@ export function createBridgeServer(options) {
      * 串成一条 promise 链：消息里要 await 群成员预热，但游标/事件顺序不能乱。
      */
     ingest(event) {
-      if (event?.type === 'message' || event?.type === 'notice') {
+      // P0-1：以前这里只放行 message/notice，内核发出的 request（好友/加群申请）
+      // 被整类丢掉——能力位 requestHandle 却是 true，机器人永远收不到申请。
+      // 三类事件必须走同一条串行链，顺序才不会乱。
+      const type = event?.type;
+      if (type === 'message' || type === 'notice' || type === 'request') {
         eventChain = eventChain
           .then(() => noteEvents(event))
           .catch((error) => { logger.warn?.('[bridge] event failed: ' + String(error && error.message ? error.message : error)); });
