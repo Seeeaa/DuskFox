@@ -52,6 +52,12 @@ export interface VideoSegment {
   readonly type: 'video';
   readonly file: string;
   readonly url?: string;
+  /** 文件名、字节数、时长（秒）都来自原生元素，拿不到就不写，不编造。 */
+  readonly name?: string;
+  readonly size?: number;
+  readonly duration?: number;
+  /** 本地路径（属于运行时所在环境，跨容器时不可直读）。 */
+  readonly path?: string;
 }
 
 export interface FileSegment {
@@ -60,6 +66,26 @@ export interface FileSegment {
   readonly name?: string;
   readonly size?: number;
   readonly url?: string;
+  /** 本地路径（属于运行时所在环境，跨容器时不可直读）。 */
+  readonly path?: string;
+}
+
+/** 合并转发里的一个节点；消息体用内部段表示，发送时再转成 OneBot 形状。 */
+export interface ForwardNode {
+  /** 发送者 QQ 号（拿不到就是空串）。 */
+  readonly userId: string;
+  readonly nickname?: string;
+  /** Epoch seconds. */
+  readonly time: number;
+  readonly segments: readonly Segment[];
+}
+
+export interface ForwardSegment {
+  readonly type: 'forward';
+  /** 原生侧的合并转发 id（res_id / msgId），用它去展开节点。 */
+  readonly id: string;
+  /** 已展开的节点；为空表示只有 id，需要 get_forward_msg 再查。 */
+  readonly content?: readonly ForwardNode[];
 }
 
 export interface JsonSegment {

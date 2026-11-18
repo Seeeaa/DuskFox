@@ -14,7 +14,10 @@ import path from 'node:path';
 
 const ELEMENT_TEXT = 1;
 const ELEMENT_PIC = 2;
+const ELEMENT_FILE = 3;
 const ELEMENT_PTT = 4;
+const ELEMENT_VIDEO = 5;
+const ELEMENT_MULTIFORWARD = 16;
 
 function svgAvatar(text) {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#0d0d0d"/><text x="32" y="42" font-family="Arial" font-size="24" font-weight="bold" fill="#df7f43" text-anchor="middle">' + text + '</text></svg>';
@@ -32,6 +35,9 @@ export function pngDataUrl() {
 
 /** Minimal AMR header so the simulated voice is real bytes, not a fake success. */
 export const TINY_AMR = Buffer.concat([Buffer.from('#!AMR\n', 'latin1'), Buffer.alloc(16)]);
+/** 文件/视频的模拟字节：真实的前缀头 + 填充，便于校验"取回的就是这条消息的字节"。 */
+export const TINY_FILE = Buffer.concat([Buffer.from('DUSKFOX-FILE\n', 'latin1'), Buffer.alloc(24)]);
+export const TINY_VIDEO = Buffer.concat([Buffer.from('\x00\x00\x00\x18ftypmp42', 'latin1'), Buffer.alloc(32)]);
 
 /**
  * 收到的语音在 QQ 侧是 RichMedia 落盘文件，pttElement.filePath 指向它。
@@ -75,8 +81,10 @@ export class SimKernel {
   constructor(options = {}) {
     this.mode = 'sim';
     this.version = 'sim-kernel-1.0';
-    this.sendSegments = ['text', 'image', 'record'];
-    this.recvSegments = ['text', 'image', 'face', 'at', 'reply', 'record'];
+    this.sendSegments = ['text', 'image', 'record', 'file', 'video', 'forward'];
+    this.recvSegments = ['text', 'image', 'record', 'file', 'video', 'forward', 'face', 'at', 'reply'];
+    /** 能按消息 id 取回字节的媒体类型（/api/media 的后端）。 */
+    this.downloadSegments = ['image', 'record', 'file', 'video'];
     this.passwordLoginEnabled = true;
     this.uin = '10001';
     this.nick = '模拟测试号';
@@ -95,6 +103,8 @@ export class SimKernel {
     this.uidToUin = new Map();
     /** msgId -> native message, exactly the shape the listener would emit. */
     this.messages = new Map();
+    /** 合并转发 id -> 节点数组（模拟原生侧的展开结果）。 */
+    this.forwardByResId = new Map();
   }
 
   async start(emit) {
@@ -197,6 +207,56 @@ export class SimKernel {
           },
         });
         normalized.push({ type: 'record', data: { file, url: file.startsWith('http') ? file : '' } });
+      } else if (segment.type === 'file') {
+        const file = String(segment.data.file ?? segment.data.path ?? segment.data.url ?? '');
+        if (!file) throw new Error('文件段缺少 file');
+        const name = String(segment.data.name ?? file.split(/[\\/]/).pop() ?? 'file.bin');
+        const size = String(TINY_FILE.length);
+        elements.push({
+          elementType: ELEMENT_FILE,
+          elementId: '',
+          fileElement: {
+            fileName: name,
+            filePath: /^(base64:\/\/|data:)/.test(file) ? '(sim-media)' : file,
+            fileSize: size,
+            fileMd5: 'sim-file-md5',
+          },
+        });
+        normalized.push({ type: 'file', data: { file: name, name, path: '(sim-media)', file_size: size } });
+      } else if (segment.type === 'video') {
+        const file = String(segment.data.file ?? segment.data.url ?? '');
+        if (!file) throw new Error('视频段缺少 file');
+        const name = String(segment.data.file_name ?? segment.data.name ?? file.split(/[\\/]/).pop() ?? 'video.mp4');
+        const duration = Number(segment.data.duration ?? 0) || 7;
+        elements.push({
+          elementType: ELEMENT_VIDEO,
+          elementId: '',
+          videoElement: {
+            fileName: name,
+            filePath: /^(base64:\/\/|data:)/.test(file) ? '(sim-media)' : file,
+            fileSize: String(TINY_VIDEO.length),
+            fileTime: duration,
+            videoMd5: 'sim-video-md5',
+            fileFormat: 2,
+          },
+        });
+        normalized.push({
+          type: 'video',
+          data: { file: name, file_name: name, path: '(sim-media)', file_size: String(TINY_VIDEO.length), duration },
+        });
+      } else if (segment.type === 'forward') {
+        if (!Array.isArray(segment.data.content) || segment.data.content.length === 0) {
+          // 本模拟内核只支持"用节点内容构造合并转发"；只给 id 的转发没有可发送的载体。
+          throw new Error('模拟内核需要 content 节点才能发送合并转发');
+        }
+        const nodeCount = segment.data.content.length;
+        elements.push({
+          elementType: ELEMENT_MULTIFORWARD,
+          elementId: '',
+          multiForwardMsgElement: { resId: 'sim-res-' + (this.seq + 1), fileName: nodeCount + '_' + this.nick, msgId: 'sim-fwd-' + (this.seq + 1) },
+        });
+        normalized.push(segment);
+        this.forwardByResId.set('sim-fwd-' + (this.seq + 1), segment.data.content);
       } else {
         elements.push({ elementType: ELEMENT_TEXT, elementId: '', textElement: { content: '[' + segment.type + ']' } });
         normalized.push(segment);
@@ -282,7 +342,7 @@ export class SimKernel {
   }
 
   /** Test hook: push an inbound message (optionally with an image or a voice note). */
-  incoming({ scene = 'private', peerId, userId, nick, text, imageUrl, voice, time = Date.now() }) {
+  incoming({ scene = 'private', peerId, userId, nick, text, imageUrl, voice, file, video, forward, time = Date.now() }) {
     const peer = String(peerId ?? (scene === 'group' ? '30001' : '20001'));
     const sender = String(userId ?? (scene === 'group' ? '20001' : peer));
     const elements = [];
@@ -315,6 +375,38 @@ export class SimKernel {
           ...(/^https?:\/\//i.test(String(voice)) ? { pttUrl: String(voice) } : {}),
         },
       });
+    }
+    if (file) {
+      const name = String(file.name ?? 'report.pdf');
+      elements.push({
+        elementType: ELEMENT_FILE,
+        elementId: 'sim-el-file',
+        fileElement: { fileName: name, filePath: '(sim-media)/' + name, fileSize: String(TINY_FILE.length), fileMd5: 'sim-file-md5' },
+      });
+    }
+    if (video) {
+      const seconds = Number(video.duration ?? 12) || 12;
+      elements.push({
+        elementType: ELEMENT_VIDEO,
+        elementId: 'sim-el-video',
+        videoElement: {
+          fileName: String(video.name ?? 'clip.mp4'),
+          filePath: '(sim-media)/' + String(video.name ?? 'clip.mp4'),
+          fileSize: String(TINY_VIDEO.length),
+          fileTime: seconds,
+          videoMd5: 'sim-video-md5',
+          fileFormat: 2,
+        },
+      });
+    }
+    if (Array.isArray(forward)) {
+      const resId = 'sim-fwd-in-' + (this.seq + 1);
+      elements.push({
+        elementType: ELEMENT_MULTIFORWARD,
+        elementId: 'sim-el-fwd',
+        multiForwardMsgElement: { resId, fileName: forward.length + '_群聊记录', msgId: resId },
+      });
+      this.forwardByResId.set(resId, forward);
     }
     const msgId = 'sim-in-' + (++this.seq);
     const native = {
@@ -375,10 +467,12 @@ export class SimKernel {
   async media(msgId, kind) {
     const msg = this.messages.get(String(msgId));
     if (!msg || !Array.isArray(msg.elements)) throw new Error('消息不存在或不可读');
-    const key = kind === 'record' ? 'pttElement' : 'picElement';
+    const keyOf = { record: 'pttElement', image: 'picElement', file: 'fileElement', video: 'videoElement' };
+    const labelOf = { record: '语音', image: '图片', file: '文件', video: '视频' };
+    const key = keyOf[kind] || 'picElement';
     const element = msg.elements.map((item) => item && item[key]).find(Boolean);
-    if (!element) throw new Error('该消息不包含' + (kind === 'record' ? '语音' : '图片'));
-    let payload = kind === 'record' ? TINY_AMR : TINY_PNG;
+    if (!element) throw new Error('该消息不包含' + (labelOf[kind] || '图片'));
+    let payload = kind === 'record' ? TINY_AMR : kind === 'file' ? TINY_FILE : kind === 'video' ? TINY_VIDEO : TINY_PNG;
     if (kind === 'record' && element.filePath && fs.existsSync(element.filePath)) {
       payload = fs.readFileSync(element.filePath);
     }
@@ -387,6 +481,21 @@ export class SimKernel {
       name: String(element.fileName || (kind === 'record' ? 'voice.amr' : 'image.png')),
       size: payload.length,
     };
+  }
+
+  /** 展开合并转发：优先用 resId，其次按消息里的 multiForwardMsgElement 反查。 */
+  async getForward(msgId) {
+    const key = String(msgId ?? '');
+    if (this.forwardByResId.has(key)) return this.forwardByResId.get(key);
+    const msg = this.messages.get(key);
+    const element = msg && (msg.elements || []).map((item) => item && item.multiForwardMsgElement).find(Boolean);
+    if (element) {
+      for (const candidate of [element.msgId, element.resId]) {
+        const hit = this.forwardByResId.get(String(candidate ?? ''));
+        if (hit) return hit;
+      }
+    }
+    return null;
   }
 
   /** Native-style lookup used by /api/message and the framework's get_msg. */

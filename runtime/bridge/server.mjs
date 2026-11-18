@@ -102,6 +102,43 @@ export function toOb11Segments(native, helpers = {}) {
       });
       continue;
     }
+    if (element?.fileElement) {
+      // FileElement：fileName/filePath/fileSize 都是实机字段；路径属于 QQ 容器。
+      const file = element.fileElement;
+      segments.push({
+        type: 'file',
+        data: {
+          file: String(file.fileName || file.fileMd5 || ''),
+          ...(file.filePath ? { path: String(file.filePath) } : {}),
+          ...(file.fileName ? { name: String(file.fileName) } : {}),
+          ...(file.fileSize ? { file_size: String(file.fileSize) } : {}),
+        },
+      });
+      continue;
+    }
+    if (element?.videoElement) {
+      // VideoElement：fileTime 是秒；元数据只报客户端真的给了的字段。
+      const video = element.videoElement;
+      const seconds = Number(video.fileTime) || 0;
+      segments.push({
+        type: 'video',
+        data: {
+          file: String(video.fileName || video.videoMd5 || ''),
+          ...(video.filePath ? { path: String(video.filePath) } : {}),
+          ...(video.fileName ? { file_name: String(video.fileName) } : {}),
+          ...(video.fileSize ? { file_size: String(video.fileSize) } : {}),
+          ...(seconds > 0 ? { duration: seconds } : {}),
+        },
+      });
+      continue;
+    }
+    if (element?.multiForwardMsgElement) {
+      // 合并转发：只带得上 id 时靠 get_forward_msg 展开，不在这里猜节点。
+      const forward = element.multiForwardMsgElement;
+      const id = String(forward.resId || forward.msgId || forward.fileName || '');
+      segments.push({ type: 'forward', data: { id } });
+      continue;
+    }
     if (element?.faceElement) {
       segments.push({ type: 'face', data: { id: String(element.faceElement.faceIndex ?? '') } });
       continue;
@@ -520,8 +557,19 @@ export function createBridgeServer(options) {
             if (!String(segment?.data?.file ?? '').trim()) return send(400, { error: '语音段缺少 file' });
             continue;
           }
-          if (segment?.type === 'video' || segment?.type === 'file') {
-            return send(501, { error: '运行时未实现 ' + segment.type + ' 发送' });
+          if (segment?.type === 'file' || segment?.type === 'video') {
+            if (!canSend(segment.type)) return send(501, { error: '运行时不支持发送 ' + segment.type });
+            if (!String(segment?.data?.file ?? segment?.data?.path ?? '').trim()) {
+              return send(400, { error: segment.type + ' 段缺少 file' });
+            }
+            continue;
+          }
+          if (segment?.type === 'forward') {
+            if (!canSend('forward')) return send(501, { error: '运行时不支持发送合并转发' });
+            if (!Array.isArray(segment?.data?.content) && !String(segment?.data?.id ?? '').trim()) {
+              return send(400, { error: '合并转发段需要 content 节点或 id' });
+            }
+            continue;
           }
         }
         const sent = await kernel.send({ scene, peerId, segments: body.segments });
@@ -588,9 +636,20 @@ export function createBridgeServer(options) {
       }
     }
 
+    if (url.pathname === '/api/forward' && request.method === 'GET') {
+      if (typeof kernel.getForward !== 'function') return send(501, { error: '运行时未实现合并转发展开' });
+      try {
+        const nodes = await kernel.getForward(String(url.searchParams.get('message_id') ?? ''));
+        if (!nodes) return send(404, { error: '合并转发不存在或已失效' });
+        return send(200, { content: nodes });
+      } catch (error) {
+        return send(404, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
     if (url.pathname === '/api/media' && request.method === 'GET') {
       if (typeof kernel.media !== 'function') return send(501, { error: '运行时未实现媒体下载' });
-      const kind = url.searchParams.get('kind') === 'record' ? 'record' : 'image';
+      const requested = String(url.searchParams.get('kind') ?? '');
+      const kind = ['image', 'record', 'file', 'video'].includes(requested) ? requested : 'image';
       try {
         const media = await kernel.media(String(url.searchParams.get('message_id') ?? ''), kind);
         return send(200, media);

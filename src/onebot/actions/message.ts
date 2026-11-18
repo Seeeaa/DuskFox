@@ -144,6 +144,63 @@ function checkSegments(segments: readonly Segment[], scene: Scene, context: Acti
   return null;
 }
 
+/**
+ * 取回媒体字节的动作：get_image / get_record / get_file / get_video 共用一套定位与错误语义。
+ * 下载是独立方向：媒体类型没在 download 里声明就直接 1200，不假装能给。
+ */
+function mediaDownloadActions(
+  name: string,
+  kind: 'image' | 'record' | 'file' | 'video',
+  label: string,
+): Array<ActionDefinition<any, any>> {
+  return [
+    {
+      name,
+      description: `取${label}消息的字节数据（base64）`,
+      requires: ['mediaDownload'],
+      params: Type.Object({
+        message_id: Type.Optional(MessageIdSchema),
+        // OneBot 规范用消息段的 file 定位；我们只能在自己的最近窗口里反查。
+        file: Type.Optional(Type.String()),
+      }),
+      async handle(params: { message_id?: number; file?: string }, context: ActionContext) {
+        if (!context.driver.capabilities.download[kind]) {
+          throw new ActionError(`运行时没有声明可下载${label}`, RETCODE.unsupported);
+        }
+        let nativeId = '';
+        if (params.message_id !== undefined) {
+          nativeId = context.messageIds.resolve(params.message_id)?.nativeId ?? '';
+        }
+        const wanted = String(params.file ?? '');
+        if (!nativeId && wanted) {
+          const hit = context.messages
+            .recent(500)
+            .find((item) => item.segments.some((segment) => segment.type === kind && segment.file === wanted));
+          nativeId = hit?.nativeId ?? '';
+        }
+        if (!nativeId) {
+          throw new ActionError(`需要 message_id，或一个仍在保留窗口内的${label} file`, RETCODE.notFound);
+        }
+        if (!context.driver.fetchMedia) throw new ActionError('当前驱动不支持媒体下载', RETCODE.unsupported);
+        try {
+          const media = await context.driver.fetchMedia(nativeId, kind);
+          if (!media) {
+            throw new ActionError(`运行时取不到该${label}：消息可能在本地窗口之外`, RETCODE.notFound);
+          }
+          return { file: 'base64://' + media.base64, file_name: media.name, file_size: media.size };
+        } catch (error) {
+          // 字节还没落盘是可重试状态，用专用 retcode 和"消息不存在"区分开。
+          const detail = error instanceof Error ? error.message : String(error);
+          if (detail.includes('MEDIA_NOT_READY')) {
+            throw new ActionError(`运行时还没有把该${label}落到本地，请稍后重试（跨容器时只能用本动作取字节）`, RETCODE.mediaNotReady);
+          }
+          throw error;
+        }
+      },
+    },
+  ];
+}
+
 export const messageActions: Array<ActionDefinition<any, any>> = [
   {
     name: 'send_private_msg',
@@ -241,37 +298,40 @@ export const messageActions: Array<ActionDefinition<any, any>> = [
       throw new ActionError('消息不存在：本地窗口（最近 500 条）已淘汰，且运行时无法按该 ID 查询', RETCODE.notFound);
     },
   },
+  ...mediaDownloadActions('get_image', 'image', '图片'),
+  ...mediaDownloadActions('get_record', 'record', '语音'),
+  ...mediaDownloadActions('get_file', 'file', '文件'),
+  ...mediaDownloadActions('get_video', 'video', '视频'),
   {
-    name: 'get_record',
-    description: '取语音消息的音频数据（base64）',
+    name: 'get_forward_msg',
+    description: '按消息 ID 展开合并转发节点',
     requires: ['mediaDownload'],
     params: Type.Object({
       message_id: Type.Optional(MessageIdSchema),
-      // OneBot 规范用消息段的 file 定位；我们只能在自己的最近窗口里反查。
-      file: Type.Optional(Type.String()),
+      // 也允许直接用合并转发段的 id（部分框架就是这么调的）。
+      id: Type.Optional(Type.String()),
     }),
-    async handle(params: { message_id?: number; file?: string }, context: ActionContext) {
-      let nativeId = '';
-      if (params.message_id !== undefined) {
+    async handle(params: { message_id?: number; id?: string }, context: ActionContext) {
+      let nativeId = String(params.id ?? '');
+      if (!nativeId && params.message_id !== undefined) {
         nativeId = context.messageIds.resolve(params.message_id)?.nativeId ?? '';
       }
-      const wanted = String(params.file ?? '');
-      if (!nativeId && wanted) {
-        const hit = context.messages
-          .recent(500)
-          .find((item) => item.segments.some((segment) => segment.type === 'record' && segment.file === wanted));
-        nativeId = hit?.nativeId ?? '';
+      if (!nativeId) throw new ActionError('需要 message_id 或合并转发段的 id', RETCODE.notFound);
+      if (!context.driver.fetchForward) {
+        throw new ActionError('当前驱动不支持展开合并转发', RETCODE.unsupported);
       }
-      if (!nativeId) {
-        throw new ActionError('需要 message_id，或一个仍在保留窗口内的语音 file', RETCODE.notFound);
+      const nodes = await context.driver.fetchForward(nativeId);
+      if (!nodes) {
+        // 只有 id、运行时又不能展开：明确报错，绝不返回空节点列表冒充成功。
+        throw new ActionError('运行时无法展开该合并转发（缺少原生展开能力或节点已失效）', RETCODE.notFound);
       }
-      if (!context.driver.fetchMedia) throw new ActionError('当前驱动不支持媒体下载', RETCODE.unsupported);
-      const media = await context.driver.fetchMedia(nativeId, 'record');
-      if (!media) {
-        throw new ActionError('运行时取不到该语音的音频：文件可能尚未落到本地，或在 QQ 里播放过一次后重试', RETCODE.notFound);
-      }
-      // 规范只定义 file；这里是 base64:// 形式（AstrBot 回传语音时同样用这种形式）。
-      return { file: 'base64://' + media.base64, file_name: media.name, file_size: media.size };
+      // 把 user_id 归一化成数字：OneBot 的节点里它是 number，原始节点可能给字符串。
+      return {
+        messages: nodes.map((node) => {
+          const item = (node ?? {}) as Record<string, unknown>;
+          return { ...item, user_id: Number(item.user_id ?? 0) || 0 };
+        }),
+      };
     },
   },
   {
