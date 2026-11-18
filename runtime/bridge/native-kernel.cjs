@@ -19,6 +19,12 @@ const SILK_WAVE = [0, 18, 9, 23, 4, 12, 7, 15, 3, 20, 11, 6, 17, 8, 13];
 const ELEMENT_REPLY = 7;
 const CHAT_PRIVATE = 1;
 const CHAT_GROUP = 2;
+/** GroupNotifyMsgType：1 = 群成员邀请我入群（处理 user2），5/7 = 需管理员审批的入群申请（处理 user1）。 */
+const GROUP_NOTIFY_INVITED_BY_MEMBER = 1;
+/** GroupNotifyMsgStatus.KUNHANDLE：只有未处理的通知才是待办请求。 */
+const GROUP_NOTIFY_KUNHANDLE = 1;
+/** 设置/取消管理员（8/12/13）不是入群请求，NapCat 也是整批跳过。 */
+const GROUP_NOTIFY_SKIP = [8, 12, 13];
 
 class NativeKernel {
   constructor(options = {}) {
@@ -131,7 +137,9 @@ class NativeKernel {
       '语音出站：ffmpeg 转 ntsilk_s16le 后的 pttElement 是否被客户端接受（需 QQ_BRIDGE_RECORD_SEND=1）',
       '语音 url：GetPttUrl 未实现，record 段通常只有 path，没有 http 链接',
       'passwordLogin 的参数（uin/passwordMd5/空 Uint8Array）与回调时序',
-      'onBuddyReqChange / onGroupNotifiesUpdated 的事件形状与 flag 映射',
+      '请求事件：buddyReqs 信封与 isInitiator/isDecide/isUnread 过滤是否与实机一致',
+      '请求事件：resolveUin 的三条回退（UixConvert / Profile / Group）返回形状',
+      '请求事件：operateSysNotify 的 doubt 与 targetMsg 字段',
     ];
     this.attachTimer = null;
     this.msgTimer = null;
@@ -453,8 +461,15 @@ class NativeKernel {
 
   /**
    * 好友/加群请求的监听与缓存。
-   * OneBot 的 flag 是运行时自己生成的标识，确认时要用它找回原生通知对象。
-   * 【待实机验证】onBuddyReqChange / onGroupNotifiesUpdated 的事件字段。
+   *
+   * 字段契约（按 NapCat 的 NodeIKernelBuddyListener / NodeIKernelGroupListener）：
+   *  - 好友：onBuddyReqChange({ unreadNums, buddyReqs: FriendRequest[] })；
+   *    FriendRequest 里只有 friendUid（**字母数字 uid**）和 extWords，没有任何 QQ 号字段；
+   *  - 群：onGroupNotifiesUpdated(doubt, GroupNotify[])；
+   *    申请人/邀请人也只有 user1.uid / user2.uid，没有 uin 字段。
+   * 所以这里的核心工作是把 uid 换成 QQ 号；换不到就保持 user_id=0 并保留 uid，
+   * 由服务端显式标注"未解析"，绝不能把字母数字 uid 交给 Number() 变成 0 号。
+   * 【待实机验证】回调形状与 resolveUin 的回退链。
    */
   attachRequestListeners(session) {
     // 好友与群监听分开注册：任一失败不拖累另一个（此前一次抛错会让群监听永远缺失）。
@@ -462,25 +477,9 @@ class NativeKernel {
       try {
         session.getBuddyService().addKernelBuddyListener({
           onBuddyReqChange: (data) => {
-            const list = data && (data.RequestList || data.requestList || []);
-            for (const item of Array.isArray(list) ? list : []) {
-              if (!item || !item.friendUid) continue;
-              const flag = 'friend|' + item.friendUid + '|' + (item.reqTime || '');
-              this.friendRequests.set(flag, { friendUid: String(item.friendUid), reqTime: String(item.reqTime || '') });
-              // 【待实机验证】请求事件的字段；flag 与 handleRequest 使用同一编码。
-              this.emit({
-                type: 'request',
-                request: {
-                  kind: 'friend',
-                  time: Math.floor(Date.now() / 1000),
-                  scene: 'private',
-                  peer: { id: String(item.friendUid) },
-                  user: { id: String(item.friendUid) },
-                  comment: String(item.msg || item.comment || ''),
-                  flag,
-                },
-              });
-            }
+            void this.handleBuddyRequests(data).catch((error) => {
+              this.probe.lastBuddyRequestError = String(error?.message || error);
+            });
           },
         });
         this.buddyListenerReady = true;
@@ -494,24 +493,9 @@ class NativeKernel {
           // 不同版本回调签名不同：可能是 (list)、({ groupList }) 或 (isRefresh, list)。
           onGroupListUpdate: (...args) => this.captureGroupListUpdate(args),
           onGroupNotifiesUpdated: (_doubt, notifications) => {
-            for (const item of Array.isArray(notifications) ? notifications : []) {
-              if (!item || !item.seq) continue;
-              const flag = 'group|' + item.seq + '|' + item.type + '|' + (item.group && item.group.groupCode);
-              this.groupNotices.set(flag, item);
-              this.emit({
-                type: 'request',
-                request: {
-                  kind: 'group',
-                  time: Math.floor(Date.now() / 1000),
-                  scene: 'group',
-                  peer: { id: String((item.group && item.group.groupCode) || '') },
-                  user: { id: String(item.uin || item.userUin || '') },
-                  comment: String(item.postscript || ''),
-                  flag,
-                  detail: { sub_type: 'add' },
-                },
-              });
-            }
+            void this.handleGroupNotifies(notifications).catch((error) => {
+              this.probe.lastGroupNotifyError = String(error?.message || error);
+            });
           },
         });
         this.groupListenerReady = true;
@@ -519,6 +503,119 @@ class NativeKernel {
         this.probe.lastGroupListenerError = String(error?.message || error?.name || error);
       }
     }
+  }
+
+  /** 好友申请：信封是 { unreadNums, buddyReqs }，只报未读、未处理、非自己发起的那几条。 */
+  async handleBuddyRequests(data) {
+    // 【待实机验证】信封字段名：真机是 buddyReqs，RequestList/requestList 只作旧版兼容。
+    const list = (data && (data.buddyReqs || data.RequestList || data.requestList)) || [];
+    for (const item of Array.isArray(list) ? list : []) {
+      if (!item || !item.friendUid) continue;
+      // 与 NapCat 同口径：自己发起、已处理、已读过的请求不再上报，避免每次连上都刷一遍。
+      if (item.isInitiator === true) continue;
+      if (item.isDecide === true) continue;
+      if (item.isUnread === false) continue;
+      const uid = String(item.friendUid);
+      const uin = await this.resolveUin(uid);
+      const flag = 'friend|' + uid + '|' + (item.reqTime || '');
+      this.friendRequests.set(flag, { friendUid: uid, reqTime: String(item.reqTime || '') });
+      this.emit({
+        type: 'request',
+        request: {
+          kind: 'friend',
+          time: Number(item.reqTime) || Math.floor(Date.now() / 1000),
+          scene: 'private',
+          peer: { id: uin || uid },
+          // id 是 QQ 号（拿不到就给空串），uid 始终带着；服务端据此决定 user_id 与是否标注未解析。
+          user: { id: uin, uid },
+          comment: String(item.extWords || item.msg || item.comment || ''),
+          flag,
+        },
+      });
+    }
+  }
+
+  /** 群通知：按 GroupNotifyMsgType + status 判定 add / invite，其余类型直接忽略。 */
+  async handleGroupNotifies(notifications) {
+    const list = Array.isArray(notifications) ? notifications : [];
+    for (const item of list) {
+      if (!item || !item.seq) continue;
+      // 只有"未处理"的通知是待办请求；已同意/已拒绝的不能再报一次。
+      if (Number(item.status) !== GROUP_NOTIFY_KUNHANDLE) continue;
+      const type = Number(item.type);
+      if (GROUP_NOTIFY_SKIP.includes(type)) continue;
+      // type=1 是"群成员邀请我入群"，操作者是 user2；type=5/7 的申请人是 user1。
+      const subType = type === GROUP_NOTIFY_INVITED_BY_MEMBER ? 'invite' : 'add';
+      const target = (subType === 'invite' ? item.user2 : item.user1) || {};
+      const uid = String(target.uid || '');
+      const uin = uid ? await this.resolveUin(uid) : '';
+      const flag = 'group|' + item.seq + '|' + item.type + '|' + ((item.group && item.group.groupCode) || '');
+      this.groupNotices.set(flag, item);
+      this.emit({
+        type: 'request',
+        request: {
+          kind: 'group',
+          time: Math.floor(Date.now() / 1000),
+          scene: 'group',
+          peer: { id: String((item.group && item.group.groupCode) || '') },
+          user: { id: uin, uid },
+          comment: String(item.postscript || ''),
+          flag,
+          detail: { sub_type: subType },
+        },
+      });
+    }
+  }
+
+  /**
+   * uid -> QQ 号。好友申请与群通知只给字母数字 uid，OneBot 的 user_id 必须是 QQ 号。
+   * 回退链与 NapCat 的 getUinByUidV2 对齐：UixConvert → Profile(FriendsServiceImpl) → Group。
+   * 三步都失败就返回空串，由上游按 user_id=0 + uid 上报——不冒充 0 号。
+   * 【待实机验证】getUixConvertService / getProfileService.getUinByUid / getGroupService.getUinByUids 的返回形状。
+   */
+  async resolveUin(uid) {
+    const key = String(uid || '');
+    if (!key) return '';
+    const cached = this.uinOfUid(key);
+    if (cached) return cached;
+    const session = this.session;
+    if (!session) return '';
+    const attempt = async (run) => {
+      try {
+        return String((await withTimeout(Promise.resolve(run()), 3000, 'resolveUin')) || '');
+      } catch (error) {
+        return '';
+      }
+    };
+    let uin = '';
+    if (typeof session.getUixConvertService === 'function') {
+      uin = await attempt(async () => {
+        const data = await session.getUixConvertService().getUin([key]);
+        const map = data && data.uinInfo;
+        return map && typeof map.get === 'function' ? map.get(key) : '';
+      });
+    }
+    if (!uin && typeof session.getProfileService === 'function') {
+      uin = await attempt(() => {
+        const map = session.getProfileService().getUinByUid('FriendsServiceImpl', [key]);
+        return map && typeof map.get === 'function' ? map.get(key) : '';
+      });
+    }
+    if (!uin && typeof session.getGroupService === 'function') {
+      uin = await attempt(async () => {
+        const data = await session.getGroupService().getUinByUids([key]);
+        const map = data && data.uins;
+        return map && typeof map.get === 'function' ? map.get(key) : '';
+      });
+    }
+    const clean = /^\d{5,12}$/.test(uin) ? uin : '';
+    if (clean) {
+      this.uinByUid.set(key, clean);
+      return clean;
+    }
+    // 诊断用：换号失败在 /api/status.probe 里可见，不用翻日志。
+    this.probe.lastResolveUinMiss = { uid: key.slice(0, 16), at: Date.now() };
+    return '';
   }
 
   /** 重启后恢复最近消息的 msgId -> 元数据，引用/撤回旧消息才不会丢。 */

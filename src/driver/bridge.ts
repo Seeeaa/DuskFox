@@ -1037,14 +1037,17 @@ export class BridgeDriver implements AccountDriver {
   #emitRequest(data: Record<string, unknown>): void {
     const type = data.request_type === 'group' ? 'group' : 'friend';
     const groupId = String(data.group_id ?? '');
+    const userId = String(data.user_id ?? '');
+    // user_id=0 说明运行时没能把原生 uid 换成 QQ 号；把 uid 带着，别让上层以为真的是 0 号。
+    const uid = String(data.uid ?? '');
     this.#context.emit({
       type: 'request',
       request: {
         kind: type,
         time: Number(data.time ?? Math.floor(Date.now() / 1000)),
         scene: type === 'group' ? 'group' : 'private',
-        peer: { id: groupId || String(data.user_id ?? '') },
-        user: { id: String(data.user_id ?? '') },
+        peer: { id: groupId || userId },
+        user: { id: userId, ...(uid ? { uid } : {}) },
         comment: String(data.comment ?? ''),
         flag: String(data.flag ?? ''),
         detail: { sub_type: data.sub_type },

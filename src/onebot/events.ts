@@ -154,11 +154,20 @@ export function buildNoticeEvent(notice: AccountNotice, ctx: EventContext): Ob11
   }
 }
 
+/**
+ * OneBot request events are keyed by numeric QQ ids. When the runtime only saw an
+ * alphanumeric uid, `user_id` degrades to 0; the raw uid then rides along so a
+ * bot can show the applicant instead of silently treating it as account 0.
+ * The `flag` always carries the runtime's own handle, so approving still works.
+ */
 export function buildRequestEvent(request: AccountRequest, ctx: EventContext): Ob11EventBase {
+  const userId = Number(request.user.id) || 0;
+  const uid = request.user.uid ?? '';
+  const identity = { user_id: userId, ...(userId === 0 && uid ? { uid } : {}) };
   if (request.kind === 'friend') {
     return base(ctx, 'request', {
       request_type: 'friend',
-      user_id: Number(request.user.id) || 0,
+      ...identity,
       comment: request.comment,
       flag: request.flag,
     });
@@ -167,7 +176,7 @@ export function buildRequestEvent(request: AccountRequest, ctx: EventContext): O
     request_type: 'group',
     sub_type: String(request.detail?.sub_type ?? 'add'),
     group_id: Number(request.peer.id) || 0,
-    user_id: Number(request.user.id) || 0,
+    ...identity,
     comment: request.comment,
     flag: request.flag,
   });
