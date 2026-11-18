@@ -14,6 +14,13 @@ export declare class NativeKernel {
   handleGroupNotifies(notifications: unknown[]): Promise<void>;
   resolveUin(uid: string): Promise<string>;
   uinOfUid(uid: string): string;
+  msgService: any;
+  getMessage(msgId: string): Promise<any>;
+  /** 文件/视频出站：RichMedia 复制 + 元素构造。 */
+  buildFileElement(rawFile: string, rawName?: string): Promise<any>;
+  buildVideoElement(rawFile: string, rawName?: string, duration?: number): Promise<any>;
+  /** 合并转发展开：getMultiMsg(parentPeer, 最外层id, msgId)。 */
+  getForward(msgId: string): Promise<any[] | null>;
 }
 
 export declare const ELEMENT_TEXT: number;
