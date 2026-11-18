@@ -294,6 +294,22 @@ async function main() {
       JSON.stringify({ group_id: groupRequestFrame.group_id, sub_type: groupRequestFrame.sub_type }),
     );
 
+    // 字母数字 uid：真实好友申请只有 uid，不能静默变成 user_id=0 的"0 号用户"
+    const uidOnlyRequest = await runtimeApi('POST', '/sim/request', {
+      kind: 'friend',
+      userId: 'u_accept0001',
+      comment: '只有 uid 的申请',
+    });
+    const uidOnlyFrame = await waitFor('uid-only 好友申请入站', () => {
+      const hit = botFrames.find((f) => f.post_type === 'request' && f.flag === uidOnlyRequest.flag);
+      return hit ?? null;
+    }, 12_000);
+    record(
+      '请求事件：字母数字 uid 保留在 uid 字段，user_id 明确为 0',
+      uidOnlyFrame.user_id === 0 && uidOnlyFrame.uid === 'u_accept0001',
+      JSON.stringify({ user_id: uidOnlyFrame.user_id, uid: uidOnlyFrame.uid }),
+    );
+
     // ------------------------------------------------------------ 独立 OneBot HTTP 动作
     const h = { 'content-type': 'application/json' };
     const httpVersion = await fetch(conns.http + '/get_version_info', { headers: h });

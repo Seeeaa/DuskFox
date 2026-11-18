@@ -19,12 +19,18 @@ export class SimKernel {
   request(input?: {
     kind?: 'friend' | 'group';
     userId?: string;
+    /** Native uid carried next to the QQ number (alphanumeric for strangers). */
+    uid?: string;
     groupId?: string;
     comment?: string;
     subType?: 'add' | 'invite';
     flag?: string;
     time?: number;
   }): string;
+  /** Register a uid -> QQ number mapping (simulates the native friend/member cache). */
+  mapUid(uid: string, uin: string): void;
+  /** Resolve a uid to a QQ number, '' when unknown. */
+  uinOfUid(uid: string): string;
   issueQr(ttlMs?: number): boolean;
   currentQr(): { picture: string | null; seq: number; expiresAt: number; expired: boolean } | null;
   requestQr(): Promise<boolean>;

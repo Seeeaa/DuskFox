@@ -105,6 +105,12 @@ export interface Peer {
 
 export interface Sender {
   readonly id: string;
+  /**
+   * Native uid when `id` could not be resolved to a QQ number (QQ gives
+   * alphanumeric uids for people who are not friends/members yet). Purely
+   * informational: OneBot actions still need a numeric id.
+   */
+  readonly uid?: string;
   readonly name?: string;
   readonly role?: 'owner' | 'admin' | 'member';
   readonly card?: string;

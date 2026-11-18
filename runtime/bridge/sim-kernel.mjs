@@ -91,6 +91,8 @@ export class SimKernel {
     this.sent = [];
     this.requests = [];
     this.fault = null;
+    /** uid -> QQ 号：模拟原生内核的好友/群成员缓存，用来验证请求事件的身份解析。 */
+    this.uidToUin = new Map();
     /** msgId -> native message, exactly the shape the listener would emit. */
     this.messages = new Map();
   }
@@ -337,11 +339,11 @@ export class SimKernel {
    * (`{ type: 'request', request: { kind, time, scene, peer, user, comment, flag, detail } }`).
    * Returns the flag a bot would echo back to set_friend_add_request / set_group_add_request.
    */
-  request({ kind = 'friend', userId, groupId, comment = '', subType = 'add', flag, time = Date.now() } = {}) {
+  request({ kind = 'friend', userId, uid, groupId, comment = '', subType = 'add', flag, time = Date.now() } = {}) {
     const type = kind === 'group' ? 'group' : 'friend';
     const user = String(userId ?? (type === 'group' ? '20010' : '20009'));
     const group = String(groupId ?? '30001');
-    const finalFlag = String(flag ?? type + '|' + user + '|' + Math.floor(time / 1000));
+    const finalFlag = String(flag ?? type + '|' + (uid || user) + '|' + Math.floor(time / 1000));
     this.emit({
       type: 'request',
       request: {
@@ -349,13 +351,24 @@ export class SimKernel {
         time: Math.floor(time / 1000),
         scene: type === 'group' ? 'group' : 'private',
         peer: { id: type === 'group' ? group : user },
-        user: { id: user },
+        // 与真机一致：好友申请只有字母数字 uid，群申请给 uin，拿不到 uin 时只有 uid。
+        user: { id: user, ...(uid ? { uid: String(uid) } : {}) },
         comment: String(comment),
         flag: finalFlag,
         ...(type === 'group' ? { detail: { sub_type: subType } } : {}),
       },
     });
     return finalFlag;
+  }
+
+  /** 测试钩子：登记一个 uid -> QQ 号映射，模拟原生内核的好友/群成员缓存。 */
+  mapUid(uid, uin) {
+    this.uidToUin.set(String(uid), String(uin));
+  }
+
+  /** uid -> QQ 号；与原生内核同名，服务端用它兜底解析请求身份。 */
+  uinOfUid(uid) {
+    return this.uidToUin.get(String(uid)) || '';
   }
 
   /** Simulated media fetch behind /api/media (image or voice). */

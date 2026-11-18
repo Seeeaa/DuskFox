@@ -261,6 +261,26 @@ export function createBridgeServer(options) {
     }
     if (native.type === 'request') {
       const request = native.request;
+      const isGroup = request.kind === 'group';
+      // 好友申请的 friendUid 是字母数字 uid，不是 QQ 号：Number('u_x') 会静默变成 0，
+      // 机器人就会以为申请人 QQ 是 0 号。能换成 QQ 号就换，换不到就明确标成未解析。
+      const rawId = String((request.user && request.user.id) ?? '');
+      const uid = String((request.user && request.user.uid) || (/^\d+$/.test(rawId) ? '' : rawId));
+      let userId = /^\d+$/.test(rawId) ? Number(rawId) : 0;
+      if (!userId && uid && typeof kernel.uinOfUid === 'function') {
+        const resolved = String(kernel.uinOfUid(uid) || '');
+        if (/^\d+$/.test(resolved) && Number(resolved) > 0) userId = Number(resolved);
+      }
+      const unresolved = !userId;
+      if (unresolved) {
+        logger.warn?.(
+          '[bridge] 请求事件的身份没能解析成 QQ 号（' +
+          (uid ? 'uid=' + uid.slice(0, 24) : '无身份字段') +
+          '），按 user_id=0 上报' + (uid ? '并附带 uid' : ''),
+        );
+      }
+      const groupId = isGroup ? Number(request.peer && request.peer.id) || 0 : 0;
+      if (isGroup && !groupId) logger.warn?.('[bridge] 群请求缺少群号，事件里 group_id 为 0');
       cursor += 1;
       ring.push({
         cursor,
@@ -268,13 +288,13 @@ export function createBridgeServer(options) {
           time: request.time,
           self_id: Number(kernel.uin),
           post_type: 'request',
-          request_type: request.kind,
-          ...(request.kind === 'group' ? { sub_type: (request.detail && request.detail.sub_type) || 'add' } : {}),
-          comment: request.comment,
+          request_type: isGroup ? 'group' : 'friend',
+          ...(isGroup ? { sub_type: String((request.detail && request.detail.sub_type) || 'add') } : {}),
+          comment: String(request.comment ?? ''),
           flag: request.flag,
-          ...(request.kind === 'group'
-            ? { group_id: Number(request.peer.id) || 0, user_id: Number(request.user.id) || 0 }
-            : { user_id: Number(request.user.id) || 0 }),
+          ...(isGroup ? { group_id: groupId, user_id: userId } : { user_id: userId }),
+          // user_id=0 时把原始 uid 带上，机器人至少能显示是谁、并照 flag 处理申请。
+          ...(unresolved && uid ? { uid } : {}),
         },
       });
       if (ring.length > RING) ring.shift();

@@ -118,6 +118,13 @@ DISPLAY=:99 /opt/QQ/qq --no-sandbox &
 
 语音段的 `path` 是 **QQ 容器里的 RichMedia 落盘路径**，不是 Fox 宿主机路径；`url` 只有在运行时真的换到 http 链接时才出现。
 
+`request` 事件：好友申请（`onBuddyReqChange` 的 `buddyReqs`）与群通知（`onGroupNotifiesUpdated` 的 `user1.uid` / `user2.uid`）
+在原生 payload 里**只有字母数字 uid，没有 QQ 号**。运行时负责换成 QQ 号（`UixConvert` → `Profile` → `Group` 三步回退）；
+三步都换不到时事件照发，`user_id=0` 并附带扩展键 `uid`，`flag` 原样保留用于处理申请——
+绝不能把 uid 丢给 `Number()` 变成"0 号用户"。
+群请求的 `sub_type` 按 `GroupNotifyMsgType` 判定：`type=1`（群成员邀请我入群，操作者是 `user2`）为 `invite`，
+`type=5/7`（需管理员审批的入群申请，申请人是 `user1`）为 `add`，`status` 必须是 `KUNHANDLE(1)` 才上报。
+
 ### 4.3 需要改的运行时文件（旧 `bridge_webui.cjs`）
 
 1. `attachLogin()`：去掉 `state.nativeProbe.wrapperObserved` 门控；先试 `require('./wrapper.node')`，
