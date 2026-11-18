@@ -197,6 +197,8 @@ export interface AccountStatus {
   readonly online: boolean;
   readonly loginType: 'none' | 'qr' | 'quick' | 'password' | 'session';
   readonly detail?: string;
+  /** Epoch ms when this account went online (survives console reloads and driver restarts). */
+  readonly onlineSince?: number;
 }
 
 export interface ProcessInfo {

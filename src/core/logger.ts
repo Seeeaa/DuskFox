@@ -10,7 +10,7 @@ const RANK: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 4
 
 /** One log line as consumed by the console (never contains raw credentials). */
 export interface LogRecord {
-  /** Local wall clock, HH:MM:SS. */
+  /** Local wall clock, MM-DD HH:MM:SS.mmm. */
   readonly time: string;
   readonly level: LogLevel;
   readonly module: string;
@@ -30,6 +30,20 @@ export interface LoggerOptions {
   console?: boolean;
 }
 
+const BASE64_BLOB = /[A-Za-z0-9+/=]{200,}/g;
+const DATA_URI = /data:[^;\s]+;base64,[A-Za-z0-9+/=]+/g;
+const MAX_LOG_MESSAGE = 2000;
+
+/**
+ * 日志里绝不允许出现整段 base64（一张图 3MB 会把日志和磁盘打爆，控制台也没法读）。
+ * 这里在写文件/标准输出/环形缓冲之前统一收口。
+ */
+export function sanitizeLogMessage(msg: string): string {
+  let out = msg.replace(DATA_URI, '[base64 omitted]');
+  out = out.replace(BASE64_BLOB, (match) => '[base64 omitted ' + match.length + ' chars]');
+  return out.length > MAX_LOG_MESSAGE ? out.slice(0, MAX_LOG_MESSAGE) + '…（已截断，原长 ' + out.length + '）' : out;
+}
+
 const ANSI: Record<LogLevel, string> = { debug: '\u001b[90m', info: '\u001b[36m', warn: '\u001b[33m', error: '\u001b[31m' };
 const RESET = '\u001b[0m';
 const DEFAULT_KEEP_DAYS = 14;
@@ -39,12 +53,44 @@ function pad(value: number, width = 2): string {
   return String(value).padStart(width, '0');
 }
 
+/**
+ * 日志时间固定用东八区（可用 DF_LOG_TIMEZONE 覆盖）。
+ * 容器默认是 UTC，直接读系统时区会让控制台显示比用户手表慢 8 小时，
+ * 排障时根本对不上“几点几分出的问题”。
+ */
+const LOG_TIME_ZONE = process.env.DF_LOG_TIMEZONE || 'Asia/Shanghai';
+
+const clockParts = new Intl.DateTimeFormat('en-GB', {
+  timeZone: LOG_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+
+function partsOf(date: Date): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of clockParts.formatToParts(date)) out[part.type] = part.value;
+  return out;
+}
+
 function stamp(date: Date): string {
-  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  const parts = partsOf(date);
+  return `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}.${pad(date.getMilliseconds(), 3)}`;
+}
+
+/** 控制台事件列表用的时间，和日志保持同一时区/口径。 */
+export function clockTime(date: Date = new Date()): string {
+  const parts = partsOf(date);
+  return `${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
 function dayStamp(date: Date): string {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const parts = partsOf(date);
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
 /**
@@ -67,6 +113,12 @@ export class Logger {
   #droppedSinceLastFlush = 0;
   #currentDay: string;
   #filePath: string;
+  #burstKey = '';
+  #burstLevel: LogLevel = 'info';
+  #burstModule = '';
+  #burstCount = 0;
+  #burstStartAt = 0;
+  #burstLastAt = 0;
   #dir: string;
   #closed = false;
 
@@ -129,7 +181,28 @@ export class Logger {
   log(level: LogLevel, module: string, msg: string): void {
     if (RANK[level] < RANK[this.#level] || this.#closed) return;
     const now = new Date();
-    const record: LogRecord = { time: stamp(now), level, module, msg, ts: now.getTime() };
+    const safe = sanitizeLogMessage(msg);
+    const key = level + '\u0000' + module + '\u0000' + safe;
+    // 同一条日志在短时间内反复出现（框架轮询不支持的动作、网络抖动）时不刷屏：
+    // 只留第一条，等这段连续重复结束时补一行“又出现 N 次”的汇总。
+    if (key === this.#burstKey && now.getTime() - this.#burstLastAt < DEDUPE_WINDOW_MS) {
+      this.#burstCount += 1;
+      this.#burstLastAt = now.getTime();
+      return;
+    }
+    this.#endBurst(now);
+    this.#burstKey = key;
+    this.#burstLevel = level;
+    this.#burstModule = module;
+    this.#burstCount = 0;
+    this.#burstStartAt = now.getTime();
+    this.#burstLastAt = now.getTime();
+    this.#write(level, module, safe, now);
+  }
+
+  #write(level: LogLevel, module: string, msg: string, now: Date): void {
+    const safe = msg;
+    const record: LogRecord = { time: stamp(now), level, module, msg: safe, ts: now.getTime() };
 
     this.#ring.push(record);
     if (this.#ring.length > this.#ringSize) this.#ring.splice(0, this.#ring.length - this.#ringSize);
@@ -137,7 +210,7 @@ export class Logger {
     if (this.#console) {
       const colour = process.stderr.isTTY ? ANSI[level] : '';
       const suffix = process.stderr.isTTY ? RESET : '';
-      process.stderr.write(`${colour}${record.time} ${level.toUpperCase().padEnd(5)} [${module}] ${msg}${suffix}\n`);
+      process.stderr.write(`${colour}${record.time} ${level.toUpperCase().padEnd(5)} [${module}] ${safe}${suffix}\n`);
     }
 
     for (const listener of this.#listeners) {
@@ -165,6 +238,19 @@ export class Logger {
       picked.push(record);
     }
     return picked.reverse();
+  }
+
+  /** 输出被合并掉的那段重复日志的汇总行。 */
+  #endBurst(now: Date): void {
+    const count = this.#burstCount;
+    const module = this.#burstModule;
+    if (count > 0 && module) {
+      const seconds = Math.max(1, Math.round((now.getTime() - this.#burstStartAt) / 1000));
+      this.#write(this.#burstLevel, module, `上一条相同日志又出现 ${count} 次（${seconds} 秒内，已合并）`, now);
+    }
+    this.#burstCount = 0;
+    this.#burstModule = '';
+    this.#burstKey = '';
   }
 
   /** Drop the in-memory ring and truncate today's file. */
@@ -260,6 +346,9 @@ export class Logger {
 
 /** Upper bound for buffered file lines. */
 const MAX_QUEUE = 5000;
+
+/** 相同日志在此窗口内只算一次，其余折叠成计数。 */
+const DEDUPE_WINDOW_MS = 30_000;
 
 /** No-op logger used by pure unit tests. */
 export function silentLogger(): Logger {

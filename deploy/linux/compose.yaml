@@ -1,0 +1,50 @@
+services:
+  qq:
+    build:
+      context: ../..
+      dockerfile: deploy/linux/Dockerfile.qq
+    image: duskfox-qq:3.2.32-52194
+    restart: unless-stopped
+    init: true
+    shm_size: 256m
+    mem_limit: 1250m
+    cpus: 1.0
+    volumes:
+      - qq-home:/home/node
+      - bridge-data:/bridge-data
+    healthcheck:
+      test: ["CMD", "node", "-e", "const s=require('net').connect(16082,'127.0.0.1');s.on('connect',()=>process.exit(0));s.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),2000)"]
+      interval: 20s
+      timeout: 4s
+      retries: 12
+      start_period: 90s
+
+  fox:
+    build:
+      context: ../..
+      dockerfile: deploy/linux/Dockerfile.fox
+    image: duskfox-app:1.0.0
+    restart: unless-stopped
+    init: true
+    mem_limit: 320m
+    cpus: 0.5
+    depends_on:
+      qq:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${DUSKFOX_WEBUI_PORT:-16084}:6099"
+      - "127.0.0.1:${DUSKFOX_ONEBOT_PORT:-13000}:3000"
+    volumes:
+      - fox-state:/state
+      - bridge-data:/run/bridge:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:6099/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 4s
+      retries: 6
+      start_period: 30s
+
+volumes:
+  qq-home:
+  bridge-data:
+  fox-state:

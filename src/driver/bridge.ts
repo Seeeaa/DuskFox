@@ -45,6 +45,8 @@ interface BridgeStatusPayload {
    */
   readonly features?: Record<string, unknown>;
   readonly self_id?: number | string;
+  /** Epoch ms when the runtime's account session started (survives runtime restarts). */
+  readonly login_at?: number;
   readonly nickname?: string;
   readonly avatar?: string;
   readonly version?: string;
@@ -121,6 +123,15 @@ export class BridgeDriver implements AccountDriver {
   /** When the current QR image was first observed, used to derive expiry. */
   #qrSeenAt = 0;
   #qrHint = '';
+  /**
+   * 驱动就绪的时刻：早于它的消息一律视为“历史积压”，不再下发给框架。
+   * 断线重连时桥接会从游标 0 重放环形缓冲，旧消息会把机器人的指令重新触发一遍。
+   */
+  #startedAt = 0;
+  /** 允许下发的最旧消息（秒）；启动后 5 秒宽限，容忍正常网络延迟。 */
+  #historyFloor = 0;
+  /** 账号这次登录的起始时间（毫秒）：运行时长按它算，而不是按页面打开时间。 */
+  #onlineSince = 0;
 
   constructor(context: DriverContext, options: DriverOptions) {
     this.#context = context;
@@ -131,6 +142,8 @@ export class BridgeDriver implements AccountDriver {
   async start(): Promise<void> {
     if (this.#started) return;
     this.#started = true;
+    this.#startedAt = Date.now();
+    this.#historyFloor = Math.floor((this.#startedAt - 5000) / 1000);
     await this.#refreshStatus();
     this.#statusTimer = setInterval(() => void this.#refreshStatus(), STATUS_INTERVAL_MS);
     this.#statusTimer.unref?.();
@@ -170,10 +183,28 @@ export class BridgeDriver implements AccountDriver {
       await this.#request('/api/login', 'POST', { method: 'password', uin, password });
       return;
     }
-    throw new Error('桥接驱动仅支持扫码或密码登录');
+    if (request.method === 'quick') {
+      if (!this.capabilities.quickLogin) throw new Error('当前运行时未启用快速登录');
+      const uin = String(request.uin ?? '').trim();
+      if (!/^\d{5,12}$/.test(uin)) throw new Error('QQ 号格式不正确');
+      await this.#request('/api/login', 'POST', { method: 'quick', uin });
+      return;
+    }
+    throw new Error('桥接驱动仅支持扫码、快速或密码登录');
+  }
+
+  async quickList(): Promise<Array<{ uin: string; nickname: string; avatar?: string }>> {
+    if (!this.capabilities.quickLogin) return [];
+    const payload = await this.#request<{ items?: Array<{ uin?: string; nickname?: string; avatar?: string }> }>('/api/quick-list');
+    return (payload?.items ?? [])
+      .map((item) => ({ uin: String(item.uin ?? ''), nickname: String(item.nickname ?? ''), avatar: String(item.avatar ?? '') }))
+      .filter((item) => item.uin);
   }
 
   async logout(): Promise<void> {
+    if (!this.capabilities.logout) throw new Error('当前运行时未提供退出登录接口');
+    await this.#request('/api/logout', 'POST', {});
+    return;
     // The bridge owns the session; there is no portable logout route yet.
     throw new Error('桥接服务未提供退出登录接口');
   }
@@ -374,6 +405,15 @@ export class BridgeDriver implements AccountDriver {
       const authorized = Boolean(payload?.authorized);
       const msf = Number(payload?.msf_status ?? 0);
       const uin = payload?.self_id ? String(payload.self_id) : '';
+      // 运行时长以“账号本次登录”为准：桥接侧持久化的 login_at 优先，
+      // 这样刷新页面或重启控制台都不会把计时清零。
+      const bridgeLoginAt = Number(payload?.login_at ?? 0) || 0;
+      if (online) {
+        if (bridgeLoginAt > 0) this.#onlineSince = bridgeLoginAt;
+        else if (!this.#onlineSince) this.#onlineSince = Date.now();
+      } else {
+        this.#onlineSince = 0;
+      }
       const next: AccountStatus = {
         uin: authorized || online ? uin : '',
         nick: authorized || online ? String(payload?.nickname ?? '') : '',
@@ -388,6 +428,7 @@ export class BridgeDriver implements AccountDriver {
           : authorized
             ? `已授权，消息网络未连接（MSF=${msf}）`
             : '桥接服务在线，但 QQ 会话尚未就绪',
+        ...(online && this.#onlineSince ? { onlineSince: this.#onlineSince } : {}),
       };
       this.#lastError = '';
       this.#setStatus(next);
@@ -536,21 +577,38 @@ export class BridgeDriver implements AccountDriver {
     }
   }
 
-  #toMessage(data: Record<string, unknown>): InboundMessage | null {
+  #toMessage(data: Record<string, unknown>, allowHistory = false): InboundMessage | null {
     // Both post types are accepted: the runtime may report our own sends as
     // `message_sent`, and the framework re-emits them as message_sent anyway.
     if (data.post_type !== 'message' && data.post_type !== 'message_sent') return null;
+    if (!allowHistory && this.#historyFloor > 0) {
+      const seconds = Number(data.time ?? 0);
+      if (seconds > 0 && seconds < this.#historyFloor) {
+        this.#context.logger.debug('driver:bridge', `忽略启动前的历史消息 id=${String(data.message_id ?? '')}`);
+        return null;
+      }
+    }
     const scene = data.message_type === 'group' ? 'group' : 'private';
     const peerId = String(data.group_id ?? data.user_id ?? '');
     if (!peerId) return null;
-    const senderId = String(data.user_id ?? peerId);
+    // 群消息没有顶层 user_id，发送者在 sender 里；之前直接退化成 peerId（群号），
+    // 导致日志出现“← 群号”、AstrBot 把群号当发送者。
+    const sender = (data.sender && typeof data.sender === 'object' ? data.sender : {}) as Record<string, unknown>;
+    const senderId = String(sender.user_id ?? data.user_id ?? peerId);
+    const senderName = sender.nickname ?? sender.card;
+    const role = sender.role === 'owner' || sender.role === 'admin' || sender.role === 'member' ? sender.role : undefined;
     return {
       scene,
       messageId: String(data.message_id ?? ''),
       time: Number(data.time ?? Math.floor(Date.now() / 1000)),
       self: data.post_type === 'message_sent' || data.self === true || senderId === this.#status.uin,
       peer: { id: peerId },
-      sender: { id: senderId },
+      sender: {
+        id: senderId,
+        ...(senderName ? { name: String(senderName) } : {}),
+        ...(sender.card ? { card: String(sender.card) } : {}),
+        ...(role ? { role } : {}),
+      },
       segments: this.#toSegments(data.message),
       raw: data,
     };
@@ -568,7 +626,7 @@ export class BridgeDriver implements AccountDriver {
       const data = await this.#request<Record<string, unknown>>(
         `/api/message?message_id=${encodeURIComponent(nativeId)}`,
       );
-      return this.#toMessage({ ...data, post_type: String(data.post_type ?? 'message') });
+      return this.#toMessage({ ...data, post_type: String(data.post_type ?? 'message') }, true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes('HTTP 404') || message.includes('HTTP 501')) return null;
@@ -791,6 +849,9 @@ export class BridgeDriver implements AccountDriver {
       try {
         const body = (await response.json()) as { error?: unknown };
         if (body && typeof body.error === 'string' && body.error) detail = '：' + body.error;
+        if (body && typeof (body as { detail?: unknown }).detail === 'string' && (body as { detail?: string }).detail) {
+          detail += '（' + String((body as { detail?: string }).detail) + '）';
+        }
       } catch {
         // Non-JSON error bodies keep the generic message.
       }
@@ -859,6 +920,11 @@ export class BridgeDriver implements AccountDriver {
       caps.mediaRecord = supported('mediaRecord') && both('record');
       caps.mediaVideo = supported('mediaVideo') && both('video');
       caps.mediaFile = supported('mediaFile') && both('file');
+      // at/reply/face 不是独立 feature，只由运行时声明的段能力决定；
+      // 之前这里漏了，导致 AstrBot 发 @ 会被“当前驱动不支持@提及”挡掉。
+      caps.at = send.has('at') && recv.has('at');
+      caps.reply = send.has('reply');
+      caps.face = send.has('face') && recv.has('face');
     }
   }
 

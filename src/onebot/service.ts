@@ -1,4 +1,4 @@
-import type { Logger } from '../core/logger.ts';
+import { clockTime, type Logger } from '../core/logger.ts';
 import type { ConfigStore } from '../core/config.ts';
 import type { Stats } from '../core/stats.ts';
 import type { AccountDriver } from '../driver/types.ts';
@@ -10,7 +10,7 @@ import type { ActionRegistry } from './actions/registry.ts';
 import { buildHeartbeatEvent, buildLifecycleEvent, buildMessageEvent, buildNoticeEvent, buildRequestEvent } from './events.ts';
 import { NetworkManager } from './network/manager.ts';
 import type { ConnectionInfo, NetworkHost } from './network/base.ts';
-import { failedResponse, okResponse, type Ob11EventBase, type Ob11Response, type TransportName } from './types.ts';
+import { ActionError, RETCODE, failedResponse, okResponse, type Ob11EventBase, type Ob11Response, type TransportName } from './types.ts';
 
 /** One line in the console event stream. */
 export interface ConsoleEvent {
@@ -160,6 +160,10 @@ export class OneBotService {
     if (message.scene === 'private' && !config.events.privateMessage) return;
     if (message.scene === 'group' && !config.events.groupMessage) return;
     if (!message.self) this.#stats.incMessagesIn();
+    // 每条消息都留一行可读日志：谁、在哪个会话、哪些段、正文摘要。排查“没收到/发不出去”靠它。
+    // 自己发的消息在 send_* 动作里已经记过一行，这里不重复占用 INFO。
+    if (message.self) this.#logger.debug('onebot', describeMessage(message));
+    else this.#logger.info('onebot', describeMessage(message));
     const event = buildMessageEvent(message, this.#eventContext());
     this.messages.save({
       nativeId: message.messageId,
@@ -209,11 +213,26 @@ export class OneBotService {
     try {
       this.#stats.incApiCall();
       const data = await this.registry.invoke(action, params, this.#actionContext());
+      // 消息类动作默认记一行 INFO；DF_LOG_MESSAGES=0 可关闭。
+      if (process.env.DF_LOG_MESSAGES !== '0' && /^send_/.test(action)) {
+        const sent = data as { message_id?: number | string } | null;
+        this.#logger.info(
+          'onebot',
+          `[发送] ${describeSend(action, params)}${sent && sent.message_id ? ' · id=' + sent.message_id : ''}`,
+        );
+      }
       return okResponse(data, echo);
     } catch (error) {
       this.#stats.incApiCall(true);
       const message = error instanceof Error ? error.message : String(error);
-      this.#logger.warn('onebot', `[${transport}] ${action} 失败：${message}`);
+      const retcode = error instanceof ActionError ? error.retcode : RETCODE.server;
+      // 能力缺失/查不到这类“框架在轮询但本来就没有”的错误不刷 warn，
+      // 否则日志里全是同一行，真正的收发记录反而被埋掉。
+      if (retcode === RETCODE.unsupported || retcode === RETCODE.notFound) {
+        this.#logger.debug('onebot', `[${transport}] ${action} 跳过：${message}`);
+      } else {
+        this.#logger.warn('onebot', `[${transport}] ${action} 失败：${message}`);
+      }
       return failedResponse(error, echo);
     }
   }
@@ -289,10 +308,9 @@ export class OneBotService {
     this.#eventSeq += 1;
     const { type, summary } = summarise(event);
     const now = new Date();
-    const pad = (value: number): string => String(value).padStart(2, '0');
     const record: ConsoleEvent = {
       seq: this.#eventSeq,
-      time: `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`,
+      time: clockTime(now),
       ts: now.getTime(),
       type,
       summary,
@@ -342,6 +360,26 @@ export function summarise(event: Ob11EventBase): { type: string; summary: string
   return { type: post, summary: '' };
 }
 
+/** 收/发消息的一行摘要：方向、会话、对方、段类型、正文预览。 */
+function describeMessage(message: InboundMessage): string {
+  const scene = message.scene === 'group' ? '[群聊] ' + message.peer.id : '[私聊] ' + message.peer.id;
+  const segs = message.segments.map((segment) => segment.type).join(',') || '空';
+  const who = message.self ? '' : ` ← ${message.sender.name || message.sender.id}`;
+  return `[${message.self ? '发送' : '接收'}] ${scene}${who} · ${segs} · ${previewText(message.segments)}`;
+}
+
+/** 主动发送动作的一行摘要。 */
+function describeSend(action: string, params: Record<string, unknown>): string {
+  const target = action.includes('group')
+    ? '[群聊] ' + String(params.group_id ?? '?')
+    : '[私聊] ' + String(params.user_id ?? '?');
+  const message = params.message;
+  const segs = Array.isArray(message)
+    ? message.map((segment) => String((segment as { type?: string })?.type ?? '?')).join(',')
+    : 'text';
+  return `${target} · ${segs} · ${previewText(message)}`;
+}
+
 function previewText(message: unknown): string {
   const flatten = (value: unknown): string => {
     if (typeof value === 'string') return value.replace(/\[CQ:[^\]]+\]/g, '');
@@ -349,8 +387,9 @@ function previewText(message: unknown): string {
     return value
       .map((segment) => {
         if (!segment || typeof segment !== 'object') return '';
-        const item = segment as { type?: string; data?: { text?: unknown } };
-        if (item.type === 'text') return String(item.data?.text ?? '');
+        // 内部模型是 { type, text }，OneBot 线上格式是 { type, data: { text } }：两种都要认。
+        const item = segment as { type?: string; text?: unknown; data?: { text?: unknown } };
+        if (item.type === 'text') return String(item.text ?? item.data?.text ?? '');
         if (item.type === 'face') return '[表情]';
         if (item.type === 'image') return '[图片]';
         if (item.type === 'at') return '@';

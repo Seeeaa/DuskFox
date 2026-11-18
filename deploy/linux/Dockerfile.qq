@@ -1,0 +1,44 @@
+FROM node:24.22.1-bookworm-slim
+
+ARG QQ_URL=https://qqdl.gtimg.cn/qqfile/QQNT/9.9.33/release/3f89efc5/QQ_3.2.32_260812_amd64_01.deb
+ARG QQ_SHA256=d085dd89397225061eb9f194308f688129818ed445777e97a4a0a16e13d7b0e8
+
+RUN --mount=type=bind,source=deploy/linux,target=/qq-package,ro \
+    apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl xvfb fluxbox dbus-x11 fonts-noto-cjk procps \
+    libgbm1 libasound2 desktop-file-utils \
+    && if [ -f /qq-package/QQ.deb ]; then \
+         cp /qq-package/QQ.deb /tmp/qq.deb; \
+       else \
+         curl -fL --retry 2 --connect-timeout 15 --max-time 300 "$QQ_URL" -o /tmp/qq.deb; \
+       fi \
+    && echo "$QQ_SHA256  /tmp/qq.deb" | sha256sum -c - \
+    && apt-get install -y --no-install-recommends /tmp/qq.deb \
+    && dpkg-query -W linuxqq \
+    && apt-get clean \
+    && find /var/lib/apt/lists -type f -delete \
+    && unlink /tmp/qq.deb
+
+COPY runtime/bridge/entry.cjs /opt/QQ/resources/app/bridge_entry.cjs
+COPY runtime/bridge/native-kernel.cjs /opt/QQ/resources/app/native-kernel.cjs
+COPY runtime/bridge/server.mjs /opt/QQ/resources/app/server.mjs
+COPY deploy/linux/start-qq.sh /app/start.sh
+
+RUN grep -Fq './application.asar/app_launcher/index.js' /opt/QQ/resources/app/package.json \
+    && sed -i 's#\./application.asar/app_launcher/index.js#./bridge_entry.cjs#' /opt/QQ/resources/app/package.json \
+    && chmod 755 /app/start.sh \
+    && mkdir -p /bridge-data /home/node/.config /home/node/.local/share \
+    && chown -R node:node /bridge-data /home/node
+
+ENV HOME=/home/node \
+    DISPLAY=:99 \
+    XDG_RUNTIME_DIR=/tmp/qq-runtime \
+    QQ_BRIDGE_DATA_DIR=/bridge-data \
+    QQ_NATIVE_UI_HOST=0.0.0.0 \
+    QQ_NATIVE_UI_PORT=16082 \
+    QQ_BRIDGE_QR_PUMP=1 \
+    QQ_BRIDGE_IMAGE_SEND=1
+
+USER node
+EXPOSE 16082
+ENTRYPOINT ["/app/start.sh"]

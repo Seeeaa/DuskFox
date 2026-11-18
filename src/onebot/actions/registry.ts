@@ -97,10 +97,19 @@ export class ActionRegistry {
     } catch (error) {
       if (error instanceof ActionError) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      this.#logger.warn('onebot', `${actionName} 失败：${message}`);
+      // 同一个动作反复失败（框架轮询、老版本 API）时不要刷屏：60 秒内只记一次。
+      const now = Date.now();
+      if (now - (this.#warnedAt.get(actionName) ?? 0) > 60_000) {
+        this.#warnedAt.set(actionName, now);
+        this.#logger.warn('onebot', `${actionName} 失败：${message}`);
+      } else {
+        this.#logger.debug('onebot', `${actionName} 失败（已节流）：${message}`);
+      }
       throw new ActionError(message, RETCODE.server);
     }
   }
+
+  #warnedAt = new Map<string, number>();
 
   #validate(definition: ActionDefinition, rawParams: unknown): any {
     if (!definition.params) return rawParams ?? {};

@@ -55,8 +55,18 @@ function replyTarget(segments: readonly Segment[]): string | undefined {
   return undefined;
 }
 
+/** 引用段的 id 由机器人按 OneBot 数字 id 传回；驱动层要的是原生 msgId。 */
+function withNativeReplyIds(segments: readonly Segment[], context: ActionContext): Segment[] {
+  return segments.map((segment) => {
+    if (segment.type !== 'reply') return segment;
+    const nativeId = context.messageIds.nativeIdOf(Number(segment.id));
+    return nativeId ? { ...segment, id: nativeId } : segment;
+  });
+}
+
 async function send(scene: Scene, peerId: number, params: SendParams, context: ActionContext): Promise<{ message_id: number }> {
-  const segments = segmentsFrom(params);
+  const parsed = segmentsFrom(params);
+  const segments = withNativeReplyIds(parsed, context);
   const verdict = checkSegments(segments, scene, context);
   if (verdict) throw verdict;
   if (!context.online()) throw new ActionError('账号未登录，无法发送消息', RETCODE.notFound);
@@ -67,6 +77,12 @@ async function send(scene: Scene, peerId: number, params: SendParams, context: A
     ...(replyTarget(segments) ? { replyTo: replyTarget(segments) } : {}),
   };
   const result = await context.driver.sendMessage(outbound);
+  context.logger.info(
+    'onebot',
+    '发 ' + (scene === 'group' ? '群 ' + peerId : '私聊 ' + peerId) +
+      ' [' + segments.map((segment) => segment.type).join(',') + ']' +
+      (outbound.replyTo ? ' 引用=' + outbound.replyTo : ''),
+  );
   context.stats.incMessagesOut();
   const numericId = context.messageIds.register(result.messageId, scene, String(peerId));
   context.messages.save({

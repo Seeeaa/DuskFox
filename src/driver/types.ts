@@ -119,6 +119,8 @@ export interface AccountDriver {
   status(): Promise<AccountStatus>;
   events(): readonly InboundMessage[];
   login(request: LoginRequest): Promise<void>;
+  /** Local saved accounts for quick login (optional). */
+  quickList?(): Promise<Array<{ uin: string; nickname: string; avatar?: string }>>;
   logout(): Promise<void>;
   qrCode(): Promise<QrPayload>;
   refreshQr(): Promise<QrPayload>;

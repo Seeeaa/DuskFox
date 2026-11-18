@@ -40,6 +40,14 @@ export function registerAccountRoutes(router: Router, context: WebuiContext): vo
     if (method === 'quick' && !context.driver.capabilities.quickLogin) {
       throw new HttpError(501, '当前驱动不支持快速登录');
     }
+    if (method === 'quick') {
+      const uin = typeof payload.uin === 'string' ? payload.uin.trim() : '';
+      // 空账号交给驱动判断（模拟驱动允许不带 uin，桥接驱动会拒绝）；非空则严格校验。
+      if (uin && !/^\d{5,12}$/.test(uin)) throw new HttpError(400, 'QQ 号格式不正确');
+      await context.driver.login({ method, uin });
+      sendJson(res, 200, { ok: true, method });
+      return;
+    }
     await context.driver.login({ method });
     sendJson(res, 200, { ok: true, method });
   });
@@ -51,7 +59,8 @@ export function registerAccountRoutes(router: Router, context: WebuiContext): vo
   });
 
   router.get('/api/account/quick-list', async ({ res }) => {
-    sendJson(res, 200, { available: context.driver.capabilities.quickLogin, items: [] });
+    const items = context.driver.quickList ? await context.driver.quickList() : [];
+    sendJson(res, 200, { available: context.driver.capabilities.quickLogin, items });
   });
 
   /** Same envelope a bot receives, which makes the console a real API client. */
@@ -77,11 +86,16 @@ export function registerAccountRoutes(router: Router, context: WebuiContext): vo
     const allowed = new Set(['all', 'debug', 'info', 'warn', 'error']);
     if (!allowed.has(level)) throw new HttpError(400, 'level 取值不合法');
     const limit = Number(url.searchParams.get('limit') ?? 400);
+    const mask = (text: string): string => {
+      let out = text.replace(/data:[^;\s]+;base64,[A-Za-z0-9+/=]+/g, '[base64 omitted]');
+      out = out.replace(/[A-Za-z0-9+/=]{240,}/g, (m) => `[base64 omitted ${m.length} chars]`);
+      return out.length > 600 ? out.slice(0, 600) + `…（已截断，原长 ${out.length}）` : out;
+    };
     const items = context.logger.query({
       level: level as 'all' | 'debug' | 'info' | 'warn' | 'error',
       contains: url.searchParams.get('contains') ?? undefined,
       limit: Number.isFinite(limit) ? limit : 400,
-    });
+    }).map((entry) => ({ ...entry, msg: mask(entry.msg) }));
     sendJson(res, 200, { items, file: context.logger.filePath, size: context.logger.fileSize() });
   });
 

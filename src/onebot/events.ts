@@ -18,8 +18,8 @@ function base(ctx: EventContext, postType: Ob11EventBase['post_type'], extra: Re
 /**
  * Build `message` or `message_sent` events from an inbound driver message.
  *
- * OneBot defines `message_sent` for messages this account sent itself;
- * frameworks that toggle `report_self_message` get the
+ * OneBot defines `message_sent` for messages this account sent itself; NapCat
+ * uses the same split, so frameworks that toggle `report_self_message` get the
  * event type they expect instead of a normal `message` with a self sender.
  */
 export function buildMessageEvent(message: InboundMessage, ctx: EventContext): Ob11EventBase {
@@ -32,10 +32,17 @@ export function buildMessageEvent(message: InboundMessage, ctx: EventContext): O
     ...(message.sender.card ? { card: message.sender.card } : {}),
     ...(message.sender.role ? { role: message.sender.role } : {}),
   };
+  // 引用段的 id 来自桥接的原生 msgId；对外必须换成 OneBot 侧的数字 id，
+  // 否则机器人拿到的 reply id 和 message_id 对不上，回引会失败。
+  const segments = message.segments.map((segment) =>
+    segment.type === 'reply'
+      ? { ...segment, id: String(ctx.messageIds.register(segment.id, message.scene, message.peer.id)) }
+      : segment,
+  );
   const common = {
     message_id: numericId,
-    message: formatMessage(message.segments, format),
-    raw_message: toCqString(message.segments),
+    message: formatMessage(segments, format),
+    raw_message: toCqString(segments),
     font: 0,
     sender,
     ...(config.debug && message.raw !== undefined ? { raw: message.raw } : {}),

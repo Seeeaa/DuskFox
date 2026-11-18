@@ -17,21 +17,51 @@ function resultEnvelope(ok, extra = {}) {
 }
 
 /** native kernel message -> OneBot message segments. */
-export function toOb11Segments(native) {
+export function toOb11Segments(native, helpers = {}) {
   const segments = [];
+  const uinOfUid = typeof helpers.uinOfUid === 'function' ? helpers.uinOfUid : null;
   for (const element of Array.isArray(native.elements) ? native.elements : []) {
-    if (element?.textElement) {
-      segments.push({ type: 'text', data: { text: String(element.textElement.content ?? '') } });
+    const text = element?.textElement;
+    if (text) {
+      // @ 是 textElement 的变体：atType 非 0 且带 atNtUid/atUid。
+      const atType = Number(text.atType ?? 0);
+      const atNtUid = String(text.atNtUid ?? '');
+      const atUid = String(text.atUid ?? '');
+        const rawUid = [atNtUid, atUid].find((uid) => uid && uid !== '0') || '';
+        const isAt = atType > 0 || Boolean(rawUid);
+      if (isAt) {
+        const resolved = rawUid && uinOfUid ? uinOfUid(rawUid) : '';
+        if (rawUid) {
+          // 这里是模块级函数，拿不到 createBridgeServer 里的 kernel/logger：
+          // 之前直接引用它们会抛 ReferenceError，带 @ 的消息会被整条丢掉。
+          if (typeof helpers.onAt === 'function') helpers.onAt(rawUid, resolved);
+          if (!resolved && rawUid !== '0' && typeof helpers.warn === 'function') {
+            helpers.warn('[bridge] @ 目标暂时无法解析成 QQ 号：' + rawUid.slice(0, 20));
+          }
+        }
+        const content = String(text.content ?? '');
+        // OneBot 的 at.qq 必须是数字或 all；未解析的 uid 保留为文本。
+        if (rawUid && !/^\d+$/.test(resolved)) {
+          segments.push({ type: 'text', data: { text: content } });
+          continue;
+        }
+        segments.push({ type: 'at', data: { qq: rawUid ? resolved : 'all' } });
+        const rest = content.startsWith('@') ? '' : content;
+        if (rest.trim()) segments.push({ type: 'text', data: { text: rest } });
+        continue;
+      }
+      segments.push({ type: 'text', data: { text: String(text.content ?? '') } });
       continue;
     }
     if (element?.picElement) {
       const pic = element.picElement;
+      const rawUrl = String(pic.originImageUrl || pic.thumbImageUrl || '');
+      const url = rawUrl.startsWith('/') ? 'https://gchat.qpic.cn' + rawUrl : rawUrl;
       segments.push({
         type: 'image',
         data: {
-          file: String(pic.fileName ?? ''),
-          ...(pic.originImageUrl ? { url: String(pic.originImageUrl) } : {}),
-          ...(pic.thumbImageUrl && !pic.originImageUrl ? { url: String(pic.thumbImageUrl) } : {}),
+          file: String(pic.fileName ?? pic.md5HexStr ?? ''),
+          ...(url ? { url } : {}),
         },
       });
       continue;
@@ -41,20 +71,40 @@ export function toOb11Segments(native) {
       continue;
     }
     if (element?.atElement) {
-      segments.push({ type: 'at', data: { qq: String(element.atElement.qq ?? element.atElement.atNtUid ?? '') } });
+      const uid = String(element.atElement.atNtUid ?? '');
+      const qq = String(element.atElement.qq ?? '') || (uinOfUid && uid ? uinOfUid(uid) : '');
+      if (/^\d+$/.test(qq)) segments.push({ type: 'at', data: { qq } });
       continue;
     }
     if (element?.replyElement) {
-      segments.push({ type: 'reply', data: { id: String(element.replyElement.replyMsgId ?? '') } });
+      // 实机形状：replayMsgId 常为 "0"，真正能对上消息的是 sourceMsgIdInRecords；
+      // 再退一步用 replayMsgSeq（会话内序号）保证事件里至少有个可回引的标识。
+      const reply = element.replyElement;
+      const candidates = [reply.sourceMsgIdInRecords, reply.replyMsgId, reply.replayMsgId, reply.replayMsgSeq];
+      const id = candidates
+        .map((value) => String(value ?? ''))
+        .find((value) => value && value !== '0') ?? '';
+      segments.push({ type: 'reply', data: { id } });
       continue;
     }
   }
   return segments;
 }
 
+const CQ_KIND = { image: 'image', face: 'face', at: 'at', reply: 'reply', record: 'record', video: 'video' };
+
+/** raw_message 按 NapCat 习惯给 CQ 字符串，而不是把所有非文本都写成 [图片]。 */
 function textOf(segments) {
   return segments
-    .map((segment) => (segment.type === 'text' ? String(segment.data?.text ?? '') : '[图片]'))
+    .map((segment) => {
+      const data = segment.data ?? {};
+      if (segment.type === 'text') return String(data.text ?? '');
+      if (segment.type === 'image') return '[CQ:image,file=' + String(data.file ?? '') + ']';
+      if (segment.type === 'at') return '[CQ:at,qq=' + String(data.qq ?? '') + ']';
+      if (segment.type === 'reply') return '[CQ:reply,id=' + String(data.id ?? '') + ']';
+      if (segment.type === 'face') return '[CQ:face,id=' + String(data.id ?? '') + ']';
+      return '[' + (CQ_KIND[segment.type] ?? segment.type) + ']';
+    })
     .join('');
 }
 
@@ -72,6 +122,7 @@ export function createBridgeServer(options) {
   let qrInFlight = false;
   let halted = false;
   let haltUntil = 0;
+  let eventChain = Promise.resolve();
   let faultStatus = 0;
   let faultUntil = 0;
 
@@ -86,7 +137,7 @@ export function createBridgeServer(options) {
     recall: true,
     friendList: true,
     groupList: true,
-    strangerInfo: false,
+    strangerInfo: typeof kernel.stranger === 'function',
     groupMemberInfo: true,
     groupMemberList: true,
     messageQuery: true,
@@ -95,7 +146,7 @@ export function createBridgeServer(options) {
     mediaVideo: false,
     mediaFile: false,
     passwordLogin: Boolean(kernel && kernel.passwordLoginEnabled),
-    quickLogin: false,
+    quickLogin: Boolean(kernel && kernel.quickLoginSupported),
     logout: false,
   };
 
@@ -138,11 +189,28 @@ export function createBridgeServer(options) {
     return 'waiting_login';
   }
 
-  function noteEvents(native) {
+  async function noteEvents(native) {
     // The kernel pushes either a fully formed message or a notice.
     if (native.type === 'message') {
+      // @ 段要数字 QQ 号；先把群成员表预热好，否则新群第一条 @ 会退化成 uid。
+      if (typeof kernel.warmGroup === 'function') {
+        await kernel.warmGroup(native.native).catch(() => {});
+      }
+      const normalized = normalizeMessage(native.native);
+      // 群号解析不到时不要产出 group_id=0 的坏事件（AstrBot 会拿它回发并失败）。
+      if (normalized.post_type === 'message' && normalized.message_type === 'group' && !normalized.group_id) {
+        logger.warn?.('[bridge] 丢弃缺少群号的群消息');
+        return;
+      }
+      note(
+        'recv ' + (normalized.message_type === 'group' ? 'group' : 'private') +
+        ' peer=' + String(normalized.group_id ?? normalized.user_id ?? '') +
+        ' from=' + String(normalized.sender?.user_id ?? '') +
+        ' segs=' + normalized.message.map((segment) => segment.type).join(',') +
+        ' mid=' + String(normalized.message_id ?? ''),
+      );
       cursor += 1;
-      ring.push({ cursor, data: normalizeMessage(native.native) });
+      ring.push({ cursor, data: normalized });
       if (ring.length > RING) ring.shift();
       return;
     }
@@ -181,8 +249,18 @@ export function createBridgeServer(options) {
    * a queried message looks exactly like the one that was pushed.
    */
   function normalizeMessage(nativeMessage) {
-    const segments = toOb11Segments(nativeMessage);
-    const isGroup = nativeMessage.chatType === 2 || Boolean(nativeMessage.groupCode);
+    const segments = toOb11Segments(nativeMessage, {
+      uinOfUid: (uid) => (typeof kernel.uinOfUid === 'function' ? kernel.uinOfUid(uid) : ''),
+      onAt: (uid, uin) => { if (typeof kernel.atProbe === 'function') kernel.atProbe(uid, uin); },
+      warn: (message) => logger.warn?.(message),
+    });
+    // 群消息判定：chatType=2 是常规形状；peerUid 全数字（群号）作为兜底，
+    // 避免某些版本 chatType 缺失时把群消息当私聊、事件里丢掉 group_id。
+    const peerUid = String(nativeMessage.peerUid ?? '');
+    const isGroup =
+      nativeMessage.chatType === 2 ||
+      Boolean(nativeMessage.groupCode) ||
+      /^\d{5,}$/.test(peerUid);
     return {
       time: Number(nativeMessage.msgTime || Math.floor(Date.now() / 1000)),
       self_id: Number(kernel.uin),
@@ -190,13 +268,17 @@ export function createBridgeServer(options) {
       message_type: isGroup ? 'group' : 'private',
       sub_type: isGroup ? 'normal' : 'friend',
       message_id: String(nativeMessage.msgId ?? ''),
-      ...(isGroup ? { group_id: Number(nativeMessage.groupCode ?? 0) } : { user_id: Number(nativeMessage.senderUin ?? 0) }),
+      ...(isGroup
+        ? { group_id: Number(nativeMessage.groupCode || peerUid || 0) || 0 }
+        : { user_id: Number(nativeMessage.senderUin || peerUid || 0) || 0 }),
       message: segments,
       raw_message: textOf(segments),
       font: 0,
       sender: {
         user_id: Number(nativeMessage.senderUin ?? 0),
-        nickname: String(nativeMessage.sendNickName ?? nativeMessage.senderUin ?? ''),
+        nickname: String(
+          nativeMessage.sendMemberName || nativeMessage.sendNickName || nativeMessage.sendRemarkName || '',
+        ),
       },
       ...(nativeMessage.self ? { self: true } : {}),
     };
@@ -244,6 +326,8 @@ export function createBridgeServer(options) {
         authorized: Boolean(status.authorized),
         msf_status: Number(status.msf ?? 0),
         self_id: status.authorized || status.online ? Number(kernel.uin) : 0,
+        // 账号本次登录的起始时间（毫秒），控制台据此显示持续在线时长。
+        login_at: Number((status && status.loginAt) || 0),
         nickname: status.nick,
         avatar: status.avatar,
         version: kernel.version,
@@ -255,7 +339,13 @@ export function createBridgeServer(options) {
         instance,
         send_segments: sendSegments,
         recv_segments: recvSegments,
-        features,
+        // 能力可能随登录状态变化（登录服务晚于进程启动），这里按当前状态重算。
+        features: {
+          ...features,
+          quickLogin: Boolean(kernel && kernel.quickLoginSupported),
+          passwordLogin: Boolean(kernel && kernel.passwordLoginEnabled),
+          logout: Boolean(kernel && kernel.logoutSupported),
+        },
         ...(typeof kernel.diagnostics === 'function' ? { native_probe: kernel.diagnostics() } : {}),
         ...(Array.isArray(kernel.pendingNative) && kernel.pendingNative.length > 0
           ? { pending_native: kernel.pendingNative }
@@ -291,7 +381,16 @@ export function createBridgeServer(options) {
       } catch {
         return send(400, { error: '请求体不是合法 JSON' });
       }
-      if (body.method !== 'password') return send(400, { error: 'method 只能是 password' });
+      if (body.method === 'quick') {
+        if (typeof kernel.quickLogin !== 'function') return send(501, { error: '运行时未实现快速登录' });
+        try {
+          await kernel.quickLogin(String(body.uin ?? ''));
+          return send(202, { accepted: true });
+        } catch (error) {
+          return send(502, { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (body.method !== 'password') return send(400, { error: 'method 只能是 password 或 quick' });
       try {
         await kernel.login({ method: 'password', uin: String(body.uin ?? ''), password: String(body.password ?? '') });
         return send(202, { accepted: true });
@@ -322,10 +421,14 @@ export function createBridgeServer(options) {
 
     if (url.pathname === '/api/send' && request.method === 'POST') {
       if (!kernel.send) return send(501, { error: '运行时未实现统一发送' });
+      let body = {};
+      let scene = 'private';
+      let peerId = '';
       try {
-        const body = JSON.parse(bodyText || '{}');
-        const scene = body.scene === 'group' ? 'group' : 'private';
-        if (!body.peer_id) return send(400, { error: '缺少 peer_id' });
+        body = JSON.parse(bodyText || '{}');
+        scene = body.scene === 'group' ? 'group' : 'private';
+        peerId = String(body.peer_id ?? '');
+        if (!peerId) return send(400, { error: '缺少 peer_id' });
         if (!Array.isArray(body.segments) || body.segments.length === 0) return send(400, { error: 'segments 不能为空' });
         for (const segment of body.segments) {
           if (segment?.type === 'image' && !segment?.data?.file) return send(400, { error: '图片段缺少 file' });
@@ -333,10 +436,18 @@ export function createBridgeServer(options) {
             return send(501, { error: '运行时未实现 ' + segment.type + ' 发送' });
           }
         }
-        const sent = await kernel.send({ scene, peerId: String(body.peer_id), segments: body.segments });
+        const sent = await kernel.send({ scene, peerId, segments: body.segments });
+        note(
+          'send ' + scene + ' peer=' + peerId +
+          ' segs=' + body.segments.map((segment) => String(segment?.type ?? '?')).join(',') +
+          ' mid=' + String(sent.messageId ?? ''),
+        );
         return send(200, { message_id: sent.messageId });
       } catch (error) {
-        return send(502, { error: '原生发送失败：' + (error instanceof Error ? error.message : String(error)) });
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error('[bridge] send failed', detail, '\n', error instanceof Error ? error.stack : '');
+        logger.warn?.('[bridge] send ' + scene + ' peer=' + peerId + ' 失败：' + detail);
+        return send(502, { error: '原生发送失败：' + detail });
       }
     }
 
@@ -369,11 +480,40 @@ export function createBridgeServer(options) {
       // Native lookup by message id; the framework falls back to this when its
       // local window no longer holds the message.
       if (!kernel.getMessage) return send(501, { error: '运行时未实现按 ID 查询' });
-      const found = await kernel.getMessage(String(url.searchParams.get('message_id') ?? ''));
-      if (!found) return send(404, { error: '消息不存在' });
-      return send(200, normalizeMessage(found));
+      try {
+        const found = await kernel.getMessage(String(url.searchParams.get('message_id') ?? ''));
+        if (!found) return send(404, { error: '消息不存在' });
+        return send(200, normalizeMessage(found));
+      } catch (error) {
+        // 404 才会被驱动当成“查不到”而不是“桥接坏了”，日志里就不会再出现 HTTP 500。
+        return send(404, { error: error instanceof Error ? error.message : String(error) });
+      }
     }
 
+    if (url.pathname === '/api/logout' && request.method === 'POST') {
+      if (typeof kernel.logout !== 'function') return send(501, { error: '运行时未实现退出登录' });
+      try {
+        await kernel.logout();
+        return send(202, { accepted: true });
+      } catch (error) {
+        return send(502, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    if (url.pathname === '/api/media' && request.method === 'GET') {
+      if (typeof kernel.media !== 'function') return send(501, { error: '运行时未实现媒体下载' });
+      const kind = url.searchParams.get('kind') === 'record' ? 'record' : 'image';
+      try {
+        const media = await kernel.media(String(url.searchParams.get('message_id') ?? ''), kind);
+        return send(200, media);
+      } catch (error) {
+        return send(404, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    if (url.pathname === '/api/quick-list' && request.method === 'GET') {
+      const items = typeof kernel.quickList === 'function' ? await kernel.quickList() : [];
+      return send(200, { items });
+    }
     if (url.pathname === '/api/friends' && request.method === 'GET') {
       return send(200, { items: await kernel.friends() });
     }
@@ -387,7 +527,11 @@ export function createBridgeServer(options) {
       return send(200, { items: await kernel.groupMembers(url.searchParams.get('group_id')) });
     }
     if (url.pathname === '/api/stranger' && request.method === 'GET') {
-      return send(501, { error: '运行时未实现陌生人信息（待实机验证）' });
+      try {
+        return send(200, await kernel.stranger(String(url.searchParams.get('user_id') ?? '')));
+      } catch (error) {
+        return send(404, { error: error instanceof Error ? error.message : String(error) });
+      }
     }
     if (url.pathname === '/api/request' && request.method === 'POST') {
       try {
@@ -475,7 +619,7 @@ export function createBridgeServer(options) {
         logger.error?.('[bridge] handler failed: ' + (error instanceof Error ? error.stack : String(error)));
         if (!response.headersSent) {
           response.writeHead(500, { 'content-type': 'application/json' });
-          response.end(JSON.stringify({ error: 'internal error' }));
+          response.end(JSON.stringify({ error: 'internal error', detail: error instanceof Error ? error.message : String(error) }));
         }
       }
     });
@@ -490,9 +634,16 @@ export function createBridgeServer(options) {
     server,
     kernel,
     features,
-    /** Kernel events are funnelled here so the ring/cursor logic lives in one place. */
+    /**
+     * Kernel events are funnelled here so the ring/cursor logic lives in one place.
+     * 串成一条 promise 链：消息里要 await 群成员预热，但游标/事件顺序不能乱。
+     */
     ingest(event) {
-      if (event?.type === 'message' || event?.type === 'notice') noteEvents(event);
+      if (event?.type === 'message' || event?.type === 'notice') {
+        eventChain = eventChain
+          .then(() => noteEvents(event))
+          .catch((error) => { logger.warn?.('[bridge] event failed: ' + String(error && error.message ? error.message : error)); });
+      }
     },
     get phase() {
       return computePhase();
