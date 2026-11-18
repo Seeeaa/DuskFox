@@ -130,7 +130,7 @@ export interface AccountDriver {
   quickList?(): Promise<Array<{ uin: string; nickname: string; avatar?: string }>>;
   logout(): Promise<void>;
   qrCode(): Promise<QrPayload>;
-  refreshQr(): Promise<QrPayload>;
+  refreshQr(force?: boolean): Promise<QrPayload>;
 
   sendMessage(message: OutboundMessage): Promise<SendResult>;
   /** Look a message up by its native id (used by `get_msg` when the window missed it). */

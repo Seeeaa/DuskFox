@@ -130,6 +130,7 @@ export class BridgeDriver implements AccountDriver {
   /** When the current QR image was first observed, used to derive expiry. */
   #qrSeenAt = 0;
   #qrHint = '';
+  #manualReloginUntil = 0;
   /**
    * 驱动就绪的时刻：早于它的消息一律视为“历史积压”，不再下发给框架。
    * 断线重连时桥接会从游标 0 重放环形缓冲，旧消息会把机器人的指令重新触发一遍。
@@ -232,7 +233,7 @@ export class BridgeDriver implements AccountDriver {
    * active ones answer 202 and deliver the picture through GET /api/qr, so the
    * refresh has to wait for it instead of returning an empty payload.
    */
-  async refreshQr(): Promise<QrPayload> {
+  async refreshQr(force = false): Promise<QrPayload> {
     if (this.#loginMode === 'passive') {
       this.#qrRefreshable = false;
       this.#qrHint = '被动模式：请在 QQ 客户端窗口里刷新二维码，本控制台会同步显示';
@@ -247,7 +248,8 @@ export class BridgeDriver implements AccountDriver {
         seq?: number;
         available?: boolean;
         accepted?: boolean;
-      }>('/api/qr/refresh', 'POST');
+      }>(force ? '/api/qr/refresh?force=1' : '/api/qr/refresh', 'POST');
+      if (force) this.#manualReloginUntil = Date.now() + 120_000;
       this.#qrRefreshable = true;
       this.#qrHint = '';
       if (payload.picture ?? payload.image) {
@@ -260,6 +262,7 @@ export class BridgeDriver implements AccountDriver {
       await this.#awaitQr(before, 6000);
       return this.#composeQr();
     } catch (error) {
+      if (force) this.#manualReloginUntil = 0;
       const detail = error instanceof Error ? error.message : String(error);
       if (detail.includes('HTTP 409')) {
         this.#qrRefreshable = false;
@@ -449,7 +452,11 @@ export class BridgeDriver implements AccountDriver {
       };
       this.#lastError = '';
       this.#setStatus(next);
-      if (online) this.#qr = { state: 'none', seq: this.#qr.seq };
+      if (online && Date.now() >= this.#manualReloginUntil) this.#qr = { state: 'none', seq: this.#qr.seq };
+      if (online && !payload?.qr_ready && this.#qr.image && this.#manualReloginUntil > 0) {
+        this.#manualReloginUntil = 0;
+        this.#qr = { state: 'none', seq: this.#qr.seq };
+      }
       if (!online && payload?.qr_ready && !this.#qr.image) await this.#fetchQr();
       this.#publishQr();
     } catch (error) {
@@ -795,8 +802,13 @@ export class BridgeDriver implements AccountDriver {
   #composeQr(): QrPayload {
     const seq = this.#qr.seq;
     // Logged in: a previously cached picture is stale, never show it again.
-    if (this.#status.online) {
+    if (this.#status.online && Date.now() >= this.#manualReloginUntil) {
       return { state: 'none', seq, refreshable: this.#qrRefreshable, loginMode: this.#loginMode };
+    }
+    if (Date.now() < this.#manualReloginUntil && this.#qr.image) {
+      return this.#qr.expiresAt && Date.now() > this.#qr.expiresAt
+        ? { ...this.#qr, state: 'expired', hint: '二维码已过期，请重新取码' }
+        : { ...this.#qr, refreshable: this.#qrRefreshable, loginMode: this.#loginMode };
     }
     // Authorised: keep the runtime's explanation instead of falling back to QR.
     if (this.#qr.state === 'none' && this.#qr.hint) return this.#qr;
