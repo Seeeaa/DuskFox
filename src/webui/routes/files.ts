@@ -14,11 +14,14 @@ interface Entry {
   readonly mtime: number;
 }
 
-/** Files that hold credentials and must never be rendered in the browser. */
+/** 存放凭据的文件：这些内容一旦在线预览就会泄露，必须始终拒绝。 */
 export function isSensitive(relativePath: string): boolean {
   const value = relativePath.replace(/^\/+/, '');
   return (
     value === 'config/webui.json' ||
+    // notify.json 存 SMTP 授权码，network.json 含外发端点等信息。
+    value === 'config/notify.json' ||
+    value === 'config/network.json' ||
     /(^|\/)admin\.token$/.test(value) ||
     /(^|\/)\.env$/.test(value) ||
     /(^|\/)onebot\.token$/.test(value)

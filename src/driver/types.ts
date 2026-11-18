@@ -22,13 +22,44 @@ import type { OnebotConfig } from '../core/config.ts';
  * need, so an unsupported feature is refused centrally instead of failing deep
  * inside a driver with an opaque error.
  */
+/** 消息段类型的统一键名，收发两个方向各自声明一份。 */
+export type SegmentKind =
+  | 'text'
+  | 'image'
+  | 'record'
+  | 'file'
+  | 'video'
+  | 'forward'
+  | 'at'
+  | 'reply'
+  | 'face'
+  | 'json'
+  | 'markdown';
+
+/** 某个方向上支持哪些消息段。能收不等于能发，所以每个方向各一个。 */
+export type SegmentCapabilities = Readonly<Record<SegmentKind, boolean>>;
+
+/** 能不能把某类媒体取回本地字节（get_record / get_file …）。 */
+export type DownloadCapabilities = Readonly<Record<'image' | 'record' | 'file' | 'video' | 'forward', boolean>>;
+
 export interface Capabilities {
   readonly privateMessage: boolean;
   readonly groupMessage: boolean;
+  /** 出站：这些段真的能被发出去。 */
+  readonly send: SegmentCapabilities;
+  /** 入站：这些段真的能被解析成 OneBot 事件。 */
+  readonly recv: SegmentCapabilities;
+  /** 查询/下载：这些媒体的字节真的能取回来。 */
+  readonly download: DownloadCapabilities;
+  /**
+   * 兼容位：两条方向都支持才算 true。新代码请直接用 send / recv，
+   * 这里只是为了不破坏既有调用点与控制台旧字段。
+   */
   readonly mediaImage: boolean;
   readonly mediaRecord: boolean;
   readonly mediaVideo: boolean;
   readonly mediaFile: boolean;
+  readonly mediaForward: boolean;
   readonly reply: boolean;
   readonly at: boolean;
   readonly face: boolean;
@@ -57,14 +88,75 @@ export interface Capabilities {
 
 export type CapabilityKey = keyof Capabilities;
 
+const NO_SEGMENTS: SegmentCapabilities = {
+  text: false,
+  image: false,
+  record: false,
+  file: false,
+  video: false,
+  forward: false,
+  at: false,
+  reply: false,
+  face: false,
+  json: false,
+  markdown: false,
+};
+
+const NO_DOWNLOADS: DownloadCapabilities = {
+  image: false,
+  record: false,
+  file: false,
+  video: false,
+  forward: false,
+};
+
+/** 用一串段类型构造方向能力表。 */
+export function segmentCapabilities(kinds: readonly SegmentKind[] = []): SegmentCapabilities {
+  const base: Record<SegmentKind, boolean> = { ...NO_SEGMENTS };
+  for (const kind of kinds) base[kind] = true;
+  return base;
+}
+
+export function downloadCapabilities(kinds: readonly (keyof DownloadCapabilities)[] = []): DownloadCapabilities {
+  const base: Record<keyof DownloadCapabilities, boolean> = { ...NO_DOWNLOADS };
+  for (const kind of kinds) base[kind] = true;
+  return base;
+}
+
+/**
+ * 兼容位由三个方向派生，避免出现"能收就算能发"的旧语义。
+ * 任何修改 send/recv 之后都必须调用它。
+ */
+export function deriveLegacyCapabilities(caps: Capabilities): void {
+  const target = caps as unknown as Record<string, unknown>;
+  target.mediaImage = caps.send.image && caps.recv.image;
+  target.mediaRecord = caps.send.record && caps.recv.record;
+  target.mediaVideo = caps.send.video && caps.recv.video;
+  target.mediaFile = caps.send.file && caps.recv.file;
+  target.reply = caps.send.reply;
+  target.at = caps.send.at && caps.recv.at;
+  target.face = caps.send.face && caps.recv.face;
+  target.forward = caps.send.forward && caps.recv.forward;
+  target.json = caps.send.json && caps.recv.json;
+  target.markdown = caps.send.markdown && caps.recv.markdown;
+  // 下载方向没有兼容位，聚合出一个"至少能下载一种媒体"的粗粒度开关，
+  // 供 requires: ['mediaDownload'] 这类旧动作做第一道门禁。
+  target.mediaDownload =
+    caps.download.image || caps.download.record || caps.download.file || caps.download.video || caps.download.forward;
+}
+
 export function capabilityMap(values: Partial<Capabilities>): Capabilities {
   const base: Capabilities = {
     privateMessage: false,
     groupMessage: false,
+    send: { ...NO_SEGMENTS },
+    recv: { ...NO_SEGMENTS },
+    download: { ...NO_DOWNLOADS },
     mediaImage: false,
     mediaRecord: false,
     mediaVideo: false,
     mediaFile: false,
+    mediaForward: false,
     reply: false,
     at: false,
     face: false,
@@ -87,7 +179,9 @@ export function capabilityMap(values: Partial<Capabilities>): Capabilities {
     passwordLogin: false,
     logout: false,
   };
-  return { ...base, ...values };
+  const merged = { ...base, ...values };
+  deriveLegacyCapabilities(merged);
+  return merged;
 }
 
 export interface DriverContext {

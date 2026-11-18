@@ -201,6 +201,16 @@ export class Application implements WebuiContext {
     const caps = this.driver.capabilities;
     const enabled = (kind: keyof typeof this.config.network): boolean =>
       (this.config.network[kind] as Array<{ enabled: boolean }>).some((entry) => entry.enabled);
+    // 三个方向分别报：能收不等于能发，能发不等于能把字节取回来。
+    const label = (kind: string): string =>
+      ({ text: '文本', image: '图片', record: '语音', file: '文件', video: '视频', forward: '合并转发' } as Record<string, string>)[kind] ?? kind;
+    const kindsOf = (table: Record<string, boolean>): string[] =>
+      Object.entries(table)
+        .filter(([, on]) => on)
+        .map(([kind]) => label(kind));
+    const sendKinds = kindsOf(caps.send as unknown as Record<string, boolean>);
+    const recvKinds = kindsOf(caps.recv as unknown as Record<string, boolean>);
+    const downloadKinds = kindsOf(caps.download as unknown as Record<string, boolean>);
     const mediaKinds = [
       caps.mediaImage ? '图片' : '',
       caps.mediaRecord ? '语音' : '',
@@ -219,9 +229,29 @@ export class Application implements WebuiContext {
       { key: 'group', label: '群消息', detail: 'send_group_msg · message.group', state: caps.groupMessage ? 'yes' : 'no' },
       {
         key: 'media',
-        label: '媒体消息段',
-        detail: media > 0 ? `已支持：${mediaKinds.join(' / ')}` : '图片 / 语音 / 视频 / 文件均未支持',
+        label: '媒体消息段（双向）',
+        detail: media > 0 ? `双向已支持：${mediaKinds.join(' / ')}` : '图片 / 语音 / 视频 / 文件均未双向支持',
         state: media === 4 ? 'yes' : media > 0 ? 'partial' : 'no',
+      },
+      {
+        key: 'media-send',
+        label: '发送方向',
+        detail: sendKinds.length > 0 ? `可发送：${sendKinds.join(' / ')}` : '任何消息段都不能发送',
+        state: sendKinds.length > 1 ? 'yes' : sendKinds.length === 1 ? 'partial' : 'no',
+      },
+      {
+        key: 'media-recv',
+        label: '接收方向',
+        detail: recvKinds.length > 0 ? `可接收：${recvKinds.join(' / ')}` : '任何消息段都不能接收',
+        state: recvKinds.length > 1 ? 'yes' : recvKinds.length === 1 ? 'partial' : 'no',
+      },
+      {
+        key: 'media-download',
+        label: '查询 / 下载',
+        detail: downloadKinds.length > 0
+          ? `可取回字节：${downloadKinds.join(' / ')}（路径属于 QQ 运行时所在环境，跨容器时用 get_record 取字节）`
+          : '没有可下载的媒体类型',
+        state: downloadKinds.length > 0 ? 'yes' : 'no',
       },
       transport('http-server', 'HTTP API', 'HTTP 服务端'),
       transport('ws-client', '反向 WS', 'WS 客户端'),
@@ -301,6 +331,9 @@ export class Application implements WebuiContext {
 
   rotateToken(next?: string): string {
     const token = this.config.rotateToken(next);
+    // 新令牌写入后，旧会话与短期票据立即作废；调用方这次响应仍正常返回。
+    this.sessions.clear();
+    this.tickets.clear();
     return token;
   }
 

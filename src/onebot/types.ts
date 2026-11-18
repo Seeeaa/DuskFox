@@ -41,6 +41,8 @@ export const RETCODE = {
   unsupported: 1200,
   forbidden: 1403,
   notFound: 1404,
+  /** DuskFox 专用：消息在，但媒体字节还没落到运行时本地，稍后重试即可。 */
+  mediaNotReady: 1405,
   server: 1500,
   timeout: 100,
 } as const;

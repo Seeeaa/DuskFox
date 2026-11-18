@@ -1,12 +1,31 @@
 import type {
   AccountDriver,
   Capabilities,
+  DownloadCapabilities,
   DriverContext,
   DriverOptions,
   MediaPayload,
+  SegmentCapabilities,
+  SegmentKind,
   SendResult,
 } from './types.ts';
-import { capabilityMap } from './types.ts';
+import { capabilityMap, deriveLegacyCapabilities, downloadCapabilities, segmentCapabilities } from './types.ts';
+import { fromOb11Segment, toOb11Segment } from '../onebot/segments.ts';
+
+/** 段类型 -> 运行时 features 里的开关名；null 表示不受 feature 位约束。 */
+const SEGMENT_FEATURE: Readonly<Record<SegmentKind, string | null>> = {
+  text: null,
+  at: null,
+  reply: null,
+  face: null,
+  json: null,
+  markdown: null,
+  image: 'mediaImage',
+  record: 'mediaRecord',
+  video: 'mediaVideo',
+  file: 'mediaFile',
+  forward: 'mediaForward',
+};
 import type {
   AccountNotice,
   AccountStatus,
@@ -44,6 +63,8 @@ interface BridgeStatusPayload {
   /** Which OneBot segments the runtime can actually send / receive. */
   readonly send_segments?: string[];
   readonly recv_segments?: string[];
+  /** 哪些媒体能按消息 id 取回字节（get_record / get_file …）。 */
+  readonly download_segments?: string[];
   /** Native calls the runtime author has not verified against a real client. */
   readonly pending_native?: string[];
   /**
@@ -116,6 +137,8 @@ export class BridgeDriver implements AccountDriver {
   #eventTimer: ReturnType<typeof setInterval> | null = null;
   #polling = false;
   #eventPolling = false;
+  /** 连续事件轮询失败次数：进入状态与日志，别让断流伪装成在线。 */
+  #pollFailures = 0;
   #lastError = '';
   #loginMode: 'active' | 'passive' | 'unknown' = 'unknown';
   /** Native phase reported by the runtime (waiting_login, scan_qr, ...). */
@@ -545,6 +568,11 @@ export class BridgeDriver implements AccountDriver {
         }
         if (instance) this.#instance = instance;
 
+        if (this.#pollFailures > 0) {
+          this.#context.logger.info('driver:bridge', `事件轮询已恢复（此前连续失败 ${this.#pollFailures} 次）`);
+          this.#pollFailures = 0;
+        }
+
         if (serverCursor < this.#cursor) {
           // The runtime restarted and its sequence restarted too: re-read from 0.
           this.#context.logger.warn('driver:bridge', '运行时事件游标重置，重新同步事件流');
@@ -578,8 +606,21 @@ export class BridgeDriver implements AccountDriver {
         // Smaller batch than the server cursor: keep paging immediately.
       }
       this.#context.logger.warn('driver:bridge', '事件追赶页数过多，下一轮继续');
-    } catch {
-      // Status polling reports the failure; event polling stays quiet.
+    } catch (error) {
+      // 以前这里把异常整个吞掉：运行时事件通道断了，控制台却还显示在线。
+      this.#pollFailures += 1;
+      const detail = error instanceof Error ? error.message : String(error);
+      if (this.#pollFailures === 1 || this.#pollFailures % 10 === 0) {
+        this.#context.logger.warn('driver:bridge', `事件轮询失败 ${this.#pollFailures} 次：${detail}`);
+      }
+      if (this.#pollFailures >= 3 && this.#status.online) {
+        this.#setStatus({
+          ...this.#status,
+          online: false,
+          state: 'error',
+          detail: `事件轮询连续失败 ${this.#pollFailures} 次，消息连接可能已断开`,
+        });
+      }
     } finally {
       this.#eventPolling = false;
     }
@@ -676,6 +717,8 @@ export class BridgeDriver implements AccountDriver {
       return { base64, name: String(data.name ?? ''), size: Number(data.size ?? 0) };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // 409 = 消息在、字节还没落盘，可重试；用专用标记让动作层报 1405 而不是"消息不存在"。
+      if (message.includes('HTTP 409')) throw new Error('MEDIA_NOT_READY: ' + message);
       if (message.includes('HTTP 404') || message.includes('HTTP 501')) return null;
       throw error;
     }
@@ -693,73 +736,14 @@ export class BridgeDriver implements AccountDriver {
     const segments: Segment[] = [];
     for (const item of input) {
       if (!item || typeof item !== 'object') continue;
-      const segment = item as { type?: string; data?: Record<string, unknown> };
-      const data = segment.data ?? {};
-      switch (segment.type) {
-        case 'text':
-          segments.push({ type: 'text', text: String(data.text ?? '') });
-          break;
-        case 'face':
-          segments.push({ type: 'face', id: String(data.id ?? '') });
-          break;
-        case 'image':
-          segments.push({
-            type: 'image',
-            file: String(data.file ?? data.url ?? ''),
-            ...(data.url ? { url: String(data.url) } : {}),
-            ...(data.summary ? { summary: String(data.summary) } : {}),
-          });
-          break;
-        case 'at': {
-          // 空 qq 会让框架 int('') 崩（AstrBot 实测），这类段直接丢弃。
-          const rawQq = String(data.qq ?? '');
-          if (rawQq !== 'all' && !/^\d+$/.test(rawQq)) {
-            this.#context.logger.debug('driver:bridge', '丢弃目标非数字的 at 段');
-            break;
-          }
-          segments.push({
-            type: 'at',
-            target: rawQq === 'all' ? 'all' : rawQq,
-            ...(data.name ? { name: String(data.name) } : {}),
-          });
-          break;
-        }
-        case 'reply':
-          segments.push({ type: 'reply', id: String(data.id ?? '') });
-          break;
-        case 'record':
-          segments.push({
-            type: 'record',
-            file: String(data.file ?? data.url ?? ''),
-            ...(data.url ? { url: String(data.url) } : {}),
-            ...(data.path ? { path: String(data.path) } : {}),
-            ...(data.file_size !== undefined ? { size: Number(data.file_size) } : {}),
-          });
-          break;
-        case 'video':
-          segments.push({ type: 'video', file: String(data.file ?? data.url ?? ''), ...(data.url ? { url: String(data.url) } : {}) });
-          break;
-        case 'file':
-          segments.push({
-            type: 'file',
-            file: String(data.file ?? data.url ?? ''),
-            ...(data.name ? { name: String(data.name) } : {}),
-            ...(data.file_size !== undefined ? { size: Number(data.file_size) } : {}),
-            ...(data.url ? { url: String(data.url) } : {}),
-          });
-          break;
-        case 'json':
-          segments.push({ type: 'json', data: typeof data.data === 'string' ? data.data : JSON.stringify(data.data ?? {}) });
-          break;
-        case 'markdown':
-          segments.push({ type: 'markdown', content: String(data.content ?? data.data ?? '') });
-          break;
-        case 'forward':
-          segments.push({ type: 'forward', id: String(data.id ?? '') });
-          break;
-        default:
-          if (segment.type) segments.push({ type: 'unknown', kind: String(segment.type), raw: data });
+      const segment = fromOb11Segment(item as { type: string; data: Record<string, unknown> });
+      // 空 qq 会让框架 int('') 崩（AstrBot 实测），这类 at 段仍然丢弃；
+      // 其余映射统一交给协议层，避免驱动里再维护一份会分叉的 switch。
+      if (segment.type === 'at' && segment.target !== 'all' && !/^\d+$/.test(segment.target)) {
+        this.#context.logger.debug('driver:bridge', '丢弃目标非数字的 at 段');
+        continue;
       }
+      segments.push(segment);
     }
     return segments;
   }
@@ -963,40 +947,50 @@ export class BridgeDriver implements AccountDriver {
     if (instance) this.#instance = instance;
     if (!features && contract < 2) return;
 
-    const caps = this.#caps as unknown as Record<string, boolean>;
+    const caps = this.#caps as unknown as Record<string, unknown>;
     if (changed) {
       this.#resetCapabilities();
       this.#context.logger.info('driver:bridge', `运行时契约更新：contract=${contract} instance=${instance || '?'}`);
     }
     if (features) {
       for (const [key, value] of Object.entries(features)) {
-        if (!(key in caps) || typeof value !== 'boolean' || key === 'qrLogin') continue;
+        // 方向能力（send/recv/download）只由段声明推导，不吃 features 里的同名键。
+        if (key === 'qrLogin' || key === 'send' || key === 'recv' || key === 'download') continue;
+        if (!(key in caps) || typeof value !== 'boolean') continue;
         caps[key] = value;
       }
     }
     if (contract >= 2) {
-      const send = new Set(payload.send_segments ?? ['text']);
-      const recv = new Set(payload.recv_segments ?? ['text']);
       const supported = (key: string): boolean => caps[key] === true;
-      const both = (segment: string): boolean => send.has(segment) && recv.has(segment);
-      caps.privateMessage = supported('privateMessage') && send.has('text');
-      caps.groupMessage = supported('groupMessage') && send.has('text');
-      caps.mediaImage = supported('mediaImage') && both('image');
-      caps.mediaRecord = supported('mediaRecord') && both('record');
-      caps.mediaVideo = supported('mediaVideo') && both('video');
-      caps.mediaFile = supported('mediaFile') && both('file');
-      // at/reply/face 不是独立 feature，只由运行时声明的段能力决定；
-      // 之前这里漏了，导致 AstrBot 发 @ 会被“当前驱动不支持@提及”挡掉。
-      caps.at = send.has('at') && recv.has('at');
-      caps.reply = send.has('reply');
-      caps.face = send.has('face') && recv.has('face');
+      // 段的"能不能用"= 方向列表里有它 + 对应的 feature 位为真。
+      const allowed = (kind: SegmentKind): boolean => {
+        const feature = SEGMENT_FEATURE[kind];
+        return feature === null || supported(feature);
+      };
+      const pickKinds = (list: readonly string[]): SegmentKind[] =>
+        list.filter((kind): kind is SegmentKind => kind in SEGMENT_FEATURE && allowed(kind as SegmentKind));
+      caps.send = segmentCapabilities(pickKinds(payload.send_segments ?? ['text']));
+      caps.recv = segmentCapabilities(pickKinds(payload.recv_segments ?? ['text']));
+      const downloadKinds = (payload.download_segments ?? []).filter(
+        (kind): kind is keyof DownloadCapabilities => kind === 'image' || kind === 'record' || kind === 'file' || kind === 'video' || kind === 'forward',
+      );
+      caps.download = downloadCapabilities(downloadKinds);
+      caps.mediaDownload = supported('mediaDownload') && downloadKinds.length > 0;
+      const sendCaps = caps.send as SegmentCapabilities;
+      caps.privateMessage = supported('privateMessage') && sendCaps.text;
+      caps.groupMessage = supported('groupMessage') && sendCaps.text;
     }
+    // 兼容位统一从三个方向派生，避免"能收就算能发"。
+    deriveLegacyCapabilities(this.#caps);
   }
 
   #resetCapabilities(): void {
     const base = capabilityMap({ privateMessage: true, qrLogin: true });
-    const caps = this.#caps as unknown as Record<string, boolean>;
-    for (const key of Object.keys(base)) caps[key] = (base as unknown as Record<string, boolean>)[key] ?? false;
+    const caps = this.#caps as unknown as Record<string, unknown>;
+    for (const key of Object.keys(base)) {
+      caps[key] = (base as unknown as Record<string, unknown>)[key];
+    }
+    deriveLegacyCapabilities(this.#caps);
   }
 
   #setStatus(next: AccountStatus): void {
@@ -1074,45 +1068,9 @@ export class BridgeDriver implements AccountDriver {
  * pulling the protocol layer into the driver.
  */
 function toWireSegment(segment: Segment): Record<string, unknown> {
-  switch (segment.type) {
-    case 'text':
-      return { type: 'text', data: { text: segment.text } };
-    case 'face':
-      return { type: 'face', data: { id: segment.id } };
-    case 'image':
-      return { type: 'image', data: { file: segment.file, ...(segment.url ? { url: segment.url } : {}) } };
-    case 'at':
-      return { type: 'at', data: { qq: segment.target } };
-    case 'reply':
-      return { type: 'reply', data: { id: segment.id } };
-    case 'record':
-      return {
-        type: 'record',
-        data: {
-          file: segment.file,
-          ...(segment.url ? { url: segment.url } : {}),
-          ...(segment.path ? { path: segment.path } : {}),
-          ...(segment.size !== undefined ? { file_size: segment.size } : {}),
-        },
-      };
-    case 'video':
-      return { type: 'video', data: { file: segment.file, ...(segment.url ? { url: segment.url } : {}) } };
-    case 'file':
-      return {
-        type: 'file',
-        data: {
-          file: segment.file,
-          ...(segment.name ? { name: segment.name } : {}),
-          ...(segment.size !== undefined ? { file_size: segment.size } : {}),
-        },
-      };
-    case 'json':
-      return { type: 'json', data: { data: segment.data } };
-    case 'markdown':
-      return { type: 'markdown', data: { content: segment.content } };
-    default:
-      return { type: 'text', data: { text: '' } };
-  }
+  // 出站映射只有一个来源：与 OneBot 协议层共用 toOb11Segment。
+  // 以前这里另写了一份 switch，缺 forward、把 unknown 降级成空文本，内容会被静默丢掉。
+  return toOb11Segment(segment) as unknown as Record<string, unknown>;
 }
 
 function toMember(payload: Record<string, unknown>, groupId: string, userId: string): GroupMember {

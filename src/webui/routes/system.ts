@@ -109,6 +109,7 @@ export function registerSystemRoutes(router: Router, context: WebuiContext, guar
     const next = typeof payload.token === 'string' ? payload.token.trim() : '';
     if (next && next.length < 8) throw new HttpError(400, '新令牌至少需要 8 个字符');
     const token = context.rotateToken(next || undefined);
-    sendJson(res, 200, { ok: true, token, note: '已写入 config/webui.json；当前会话继续有效' });
+    // 轮换会立刻清空会话与票据，调用方这次请求本身仍然正常返回。
+    sendJson(res, 200, { ok: true, token, note: '已写入 config/webui.json；旧的会话与短期票据已全部失效，请用新令牌重新登录' });
   });
 }
