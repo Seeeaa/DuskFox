@@ -15,4 +15,6 @@ docker compose -f deploy/linux/compose.yaml exec -T fox node -p "JSON.parse(requ
 
 构建时从 QQ 官方地址获取固定版本客户端，仓库不附带 QQ 安装包。官方 CDN 下载不通时，可按安装说明自行提供同版 `QQ.deb`。全新环境的安装流程仍在验证。
 
+邮件提醒在控制台“设置 → 通知”填写自己的 SMTP 主机、邮箱账号与授权码，保存后点“发送测试邮件”。上线、掉线和运行错误可分别开启；邮件由 Fox 进程发送，不依赖 QQ 在线。
+
 [本地演示](docs/install.md) · [许可](LICENSE)

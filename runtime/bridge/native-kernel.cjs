@@ -532,7 +532,8 @@ class NativeKernel {
         if (!this.metaPath) return;
         const messages = [];
         for (const [, meta] of this.metaByMsgId) messages.push(meta);
-        const recent = messages.slice(-400);
+        // 保留更多消息元数据：Fox 重启后 get_msg/引用要在更长窗口内仍能反查。
+      const recent = messages.slice(-2000);
         fs.writeFileSync(this.metaPath, JSON.stringify({ at: Date.now(), messages: recent }));
         this.probe.metaSaved = recent.length;
       } catch (error) {
@@ -753,6 +754,27 @@ class NativeKernel {
     Promise.resolve()
       .then(() => this.groupMembers(key))
       .catch((error) => { this.probe.memberWarmError = String(error && error.message ? error.message : error); });
+  }
+
+  /** 群号 -> 群名（来自 onGroupListUpdate 缓存），消息事件里补 group_name 用。 */
+  groupNameOf(groupId) {
+    const code = String(groupId ?? '');
+    if (!code) return '';
+    for (const item of Array.isArray(this.groupListCache) ? this.groupListCache : []) {
+      if (String(item && item.groupCode) === code) return String(item.groupName || '');
+    }
+    return '';
+  }
+
+  /** 群号+QQ号 -> 成员角色（owner/admin/member），消息事件 sender.role 用。 */
+  memberRoleOf(groupId, uin) {
+    const key = String(groupId ?? '');
+    const target = String(uin ?? '');
+    if (!key || !target) return '';
+    const entry = this.memberListCache.get(key);
+    const hit = (entry && Array.isArray(entry.list) ? entry.list : []).find((item) => String(item && item.uin) === target);
+    if (!hit) return '';
+    return hit.role === 4 ? 'owner' : hit.role === 3 ? 'admin' : 'member';
   }
 
   /** 诊断用：记下最近一次 @ 解析结果，/api/status 里能看到 uid -> QQ 号是否成功。 */

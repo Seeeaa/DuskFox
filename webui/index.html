@@ -637,7 +637,7 @@ var API={status:{m:'GET',p:'/api/status'},config:{m:'GET',p:'/api/config'},logs:
  resetCfg:{m:'POST',p:'/api/config/reset'},token:{m:'PUT',p:'/api/security/token'}};
 
 var T0=0;
-var S={demo:'normal',stat:{rx:0,tx:0,conn:0,epm:0},
+var S={demo:'normal',stat:{rx:0,tx:0,conn:0,epm:0},notify:{host:'',port:465,secure:true,username:'',from:'',to:'',online:false,offline:false,error:false,passwordConfigured:false},
  acct:{uin:'',nick:'',online:false,via:'未登录',avatar:''},
  proc:{pid:'—',cpu:null,mem:null,ver:'—',args:'—',running:false},procAvail:false,procNote:'',procCtl:false,
  net:{'http-server':[],'ws-client':[],'http-client':[],'sse':[],'ws-server':[]},
@@ -1183,8 +1183,10 @@ var SP={appearance:function(){return '<div class="list">'+row('主题','浅色�
    '<div class="ff"><label class="fld"><span>新管理令牌</span><input id="ntk" type="password" placeholder="至少 8 个字符（留空则随机生成）"></label></div>'+
    '<div class="list">'+row('会话时长','超时后需要重新输入令牌','<span class="muted">'+((S.webui&&S.webui.sessionMinutes)||120)+' 分钟</span>')+row('IP 白名单','限制控制台来源地址','<span class="muted">'+((S.webui&&S.webui.allowlist&&S.webui.allowlist.length)?E(S.webui.allowlist.join(', ')):'未启用')+'</span>')+'</div>'+
    '<div class="row" style="margin-top:22px"><button class="btn" data-act="token">更新令牌</button></div>'},
- notify:function(){return '<div class="list">'+row('账号上线','通知通道尚未实现',sw(false,'no1',true))+row('账号掉线','通知通道尚未实现',sw(false,'no2',true))+row('运行错误','通知通道尚未实现',sw(false,'no3',true))+'</div>'+
-   '<div style="margin-top:22px"><label class="fld"><span>Webhook 地址</span><input placeholder="https://…" disabled></label><button class="btn g s" disabled>发送测试通知</button></div>'},
+ notify:function(){var n=S.notify;return '<div class="note">使用自己的邮箱 SMTP 发送通知。授权码仅保存在本实例的 config/notify.json，不在页面回显。</div>'+
+  '<div class="ff"><label class="fld"><span>SMTP 主机</span><input id="smhost" value="'+E(n.host)+'" placeholder="smtp.example.com"></label><label class="fld"><span>端口</span><input id="smport" type="number" value="'+E(n.port)+'"></label><label class="fld"><span>加密方式</span><select id="smsecure"><option value="true"'+(n.secure?' selected':'')+'>SSL/TLS（通常 465）</option><option value="false"'+(!n.secure?' selected':'')+'>STARTTLS（通常 587）</option></select></label><label class="fld"><span>SMTP 账号</span><input id="smuser" value="'+E(n.username)+'"></label><label class="fld"><span>授权码</span><input id="smpass" type="password" autocomplete="new-password" placeholder="'+(n.passwordConfigured?'已配置；留空保持原值':'填写邮箱 SMTP 授权码')+'"></label><label class="fld"><span>发件邮箱</span><input id="smfrom" value="'+E(n.from)+'"></label><label class="fld"><span>收件邮箱</span><input id="smto" value="'+E(n.to)+'"></label></div>'+
+  '<div class="list">'+row('账号上线','消息会话连接后发送',sw(!!n.online,'smOnline'))+row('账号掉线','持续断开 30 秒后发送',sw(!!n.offline,'smOffline'))+row('运行错误','同类错误十分钟内限发',sw(!!n.error,'smError'))+'</div>'+
+  '<div class="row" style="margin-top:22px;gap:12px"><button class="btn" data-act="notify_save">保存邮件设置</button><button class="btn g" data-act="notify_test">发送测试邮件</button></div>'},
  storage:function(){var st=S.storage;
   if(!st||!st.buckets)return '<div class="sk" style="width:60%"></div><div class="sk"></div><div class="sk" style="width:40%"></div>';
   return '<div class="list">'+st.buckets.map(function(b){
@@ -1202,6 +1204,7 @@ P.settings={n:'设置',r:function(){return head(8,'设置','外观、控制台�
   function paint(){
    $('#sbody').innerHTML=SP[STT]();
    if(STT==='storage')loadStorage();
+   if(STT==='notify')api('GET','/api/notify').then(function(d){S.notify=d;if(STT==='notify'&&$('#sbody'))$('#sbody').innerHTML=SP.notify()}).catch(function(err){toast('邮件设置加载失败',err.message||'')});
   }
   function loadStorage(){
    api('GET','/api/storage').then(function(d){
@@ -1414,6 +1417,7 @@ document.addEventListener('click',function(e){
   var on=!w.classList.contains('on');w.classList.toggle('on',on);w.setAttribute('aria-checked',on);
   var id=w.dataset.sw;e.stopPropagation();
   if(id==='no1'||id==='no2'||id==='no3')return;
+  if(id==='smOnline'||id==='smOffline'||id==='smError'){S.notify[{smOnline:'online',smOffline:'offline',smError:'error'}[id]]=on;return}
   if(id&&id.indexOf('evt_')===0){S.evt[id.slice(4)]=on;saveOnebot();return}
   if(id in SET){SET[id]=on;saveSet();return}
   if(S.ob&&id in S.ob){S.ob[id]=on;return}
@@ -1456,6 +1460,13 @@ async function handleAct(a,e){
   return;
  }
  if(act==='obsave'){return withBusy(a,'保存中',saveOnebot)}
+ if(act==='notify_save'){
+  var n=S.notify;
+  n.host=$('#smhost').value.trim();n.port=+$('#smport').value;n.secure=$('#smsecure').value==='true';n.username=$('#smuser').value.trim();n.from=$('#smfrom').value.trim();n.to=$('#smto').value.trim();
+  var pw=$('#smpass').value;
+  return withBusy(a,'保存中',async function(){S.notify=await api('PUT','/api/notify',Object.assign({},n,pw?{password:pw}:{}));$('#sbody').innerHTML=SP.notify();toast('邮件设置已保存')});
+ }
+ if(act==='notify_test'){return withBusy(a,'发送中',async function(){await api('POST','/api/notify/test');toast('测试邮件已提交','请检查收件箱与垃圾邮件')})}
  if(act==='token'){
   var f=$('#ntk');if(!f)return;
   var nv=f.value.trim();

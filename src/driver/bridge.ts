@@ -610,9 +610,10 @@ export class BridgeDriver implements AccountDriver {
     return {
       scene,
       messageId: String(data.message_id ?? ''),
+      ...(data.message_seq ? { seq: String(data.message_seq) } : {}),
       time: Number(data.time ?? Math.floor(Date.now() / 1000)),
       self: data.post_type === 'message_sent' || data.self === true || senderId === this.#status.uin,
-      peer: { id: peerId },
+      peer: { id: peerId, ...(data.group_name ? { name: String(data.group_name) } : {}) },
       sender: {
         id: senderId,
         ...(senderName ? { name: String(senderName) } : {}),

@@ -1,4 +1,6 @@
 node_modules/
+.npm-cache/
+.test-tmp/
 dist/
 *.log
 .DS_Store

@@ -1,4 +1,4 @@
-import type { Scene, Segment } from './model.ts';
+import type { Scene, Segment, Sender } from './model.ts';
 
 export interface StoredMessage {
   /** Insertion order, useful for "recent messages" views. */
@@ -12,6 +12,8 @@ export interface StoredMessage {
   readonly peerName?: string;
   readonly senderId: string;
   readonly senderName?: string;
+  readonly senderCard?: string;
+  readonly senderRole?: Sender['role'];
   /** Epoch seconds. */
   readonly time: number;
   readonly self: boolean;

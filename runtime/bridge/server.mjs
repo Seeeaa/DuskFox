@@ -34,19 +34,29 @@ export function toOb11Segments(native, helpers = {}) {
         if (rawUid) {
           // 这里是模块级函数，拿不到 createBridgeServer 里的 kernel/logger：
           // 之前直接引用它们会抛 ReferenceError，带 @ 的消息会被整条丢掉。
-          if (typeof helpers.onAt === 'function') helpers.onAt(rawUid, resolved);
-          if (!resolved && rawUid !== '0' && typeof helpers.warn === 'function') {
+          if (typeof helpers.onAt === 'function') helpers.onAt(rawUid, String(atUid && atUid !== '0' ? atUid : resolved));
+          if (!resolved && !/^\d+$/.test(atUid) && rawUid !== '0' && typeof helpers.warn === 'function') {
             helpers.warn('[bridge] @ 目标暂时无法解析成 QQ 号：' + rawUid.slice(0, 20));
           }
         }
         const content = String(text.content ?? '');
-        // OneBot 的 at.qq 必须是数字或 all；uid 没映射上但本身是数字（atUid 存 uin）时直接用。
-        const qq = /^\d+$/.test(resolved) ? resolved : /^\d+$/.test(atUid) ? atUid : /^\d+$/.test(rawUid) ? rawUid : '';
-        if (rawUid && !qq) {
-          segments.push({ type: 'text', data: { text: content } });
+        // 实机里 atUid 存的就是 QQ 号：优先直接用，不再依赖 uid→uin 映射是否命中。
+        // 之前优先用 atNtUid(uid) 做映射，缓存没命中就退化成文本，导致普通用户 @ 机器人时事件里没有 at 段。
+        const qq = /^\d+$/.test(atUid) && atUid !== '0'
+          ? atUid
+          : /^\d+$/.test(resolved)
+            ? resolved
+            : /^\d+$/.test(rawUid) && rawUid !== '0'
+              ? rawUid
+              : '';
+        // 只有 atType===1 才是 @全体；解析不出数字 QQ 号时退化成文本，
+        // 绝不能把“未知的 @”当成 @全体发出去。
+        const target = qq || (atType === 1 ? 'all' : '');
+        if (!target) {
+          if (content) segments.push({ type: 'text', data: { text: content } });
           continue;
         }
-        segments.push({ type: 'at', data: { qq: rawUid ? qq : 'all' } });
+        segments.push({ type: 'at', data: { qq: target } });
         const rest = content.startsWith('@') ? '' : content;
         if (rest.trim()) segments.push({ type: 'text', data: { text: rest } });
         continue;
@@ -78,10 +88,10 @@ export function toOb11Segments(native, helpers = {}) {
       continue;
     }
     if (element?.replyElement) {
-      // 实机形状：replayMsgId 常为 "0"，真正能对上消息的是 sourceMsgIdInRecords；
-      // 再退一步用 replayMsgSeq（会话内序号）保证事件里至少有个可回引的标识。
+      // 实机形状：replayMsgId 常为 "0"，真正能对上消息的是 sourceMsgIdInRecords。
+      // replayMsgSeq 是会话内序号而不是消息 id，框架拿它调 get_msg 只会 404，不能当兜底。
       const reply = element.replyElement;
-      const candidates = [reply.sourceMsgIdInRecords, reply.replyMsgId, reply.replayMsgId, reply.replayMsgSeq];
+      const candidates = [reply.sourceMsgIdInRecords, reply.replyMsgId, reply.replayMsgId];
       const id = candidates
         .map((value) => String(value ?? ''))
         .find((value) => value && value !== '0') ?? '';
@@ -275,12 +285,21 @@ export function createBridgeServer(options) {
         : { user_id: Number(nativeMessage.senderUin || peerUid || 0) || 0 }),
       message: segments,
       raw_message: textOf(segments),
-      font: 0,
+      font: 14,
+      // NapCat 同款：nickname 是昵称、card 是群名片；另外带上原生 msgSeq 供框架 real_seq 使用。
+      message_seq: String(nativeMessage.msgSeq ?? ''),
+      ...(isGroup && typeof kernel.groupNameOf === 'function'
+        ? { group_name: String(kernel.groupNameOf(nativeMessage.groupCode || peerUid) || '') }
+        : {}),
       sender: {
         user_id: Number(nativeMessage.senderUin ?? 0),
         nickname: String(
-          nativeMessage.sendMemberName || nativeMessage.sendNickName || nativeMessage.sendRemarkName || '',
+          nativeMessage.sendNickName || nativeMessage.sendMemberName || nativeMessage.sendRemarkName || '',
         ),
+        card: String(nativeMessage.sendMemberName ?? ''),
+        ...(isGroup && typeof kernel.memberRoleOf === 'function'
+          ? { role: kernel.memberRoleOf(nativeMessage.groupCode || peerUid, nativeMessage.senderUin) }
+          : {}),
       },
       ...(nativeMessage.self ? { self: true } : {}),
     };

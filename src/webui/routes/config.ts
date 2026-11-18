@@ -2,6 +2,7 @@ import type { Router } from '../http.ts';
 import { HttpError, sendAttachment, sendJson } from '../http.ts';
 import type { WebuiContext } from '../context.ts';
 import { ConfigError } from '../../core/config.ts';
+import { mailErrorCode } from '../../notify.ts';
 
 /** Map config validation failures to 400 with the field paths attached. */
 function asHttpError(error: unknown): never {
@@ -13,6 +14,25 @@ function asHttpError(error: unknown): never {
 
 /** Configuration read/write/export/import/reset. */
 export function registerConfigRoutes(router: Router, context: WebuiContext): void {
+  router.get('/api/notify', async ({ res }) => {
+    sendJson(res, 200, context.notifications.publicSettings());
+  });
+  router.put('/api/notify', async ({ res, body }) => {
+    try {
+      context.notifications.update(await body());
+    } catch (error) {
+      asHttpError(error);
+    }
+    sendJson(res, 200, { ok: true, ...context.notifications.publicSettings() });
+  });
+  router.post('/api/notify/test', async ({ res }) => {
+    try {
+      await context.notifications.test();
+    } catch (error) {
+      throw new HttpError(502, `邮件发送失败：${mailErrorCode(error)}。请检查主机、端口、TLS 与授权码。`);
+    }
+    sendJson(res, 200, { ok: true });
+  });
   router.get('/api/config', async ({ res }) => {
     const snapshot = context.config.snapshot();
     sendJson(res, 200, {

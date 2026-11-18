@@ -29,6 +29,8 @@ export interface OneBotServiceOptions {
   readonly driver: AccountDriver;
   readonly stats: Stats;
   readonly version: string;
+  /** 消息 id 窗口的持久化文件；留空则只保存在内存里，重启后无法反查。 */
+  readonly stateFile?: string;
 }
 
 /**
@@ -65,7 +67,11 @@ export class OneBotService {
     this.#stats = options.stats;
     this.#version = options.version;
     this.registry = createActionRegistry(options.logger);
-    this.messageIds = new MessageIdRegistry(options.config.onebot.messageIdMode);
+    this.messageIds = new MessageIdRegistry(
+      options.config.onebot.messageIdMode,
+      undefined,
+      options.stateFile ?? null,
+    );
     this.#manager = this.#createManager();
   }
 
@@ -173,6 +179,8 @@ export class OneBotService {
       ...(message.peer.name ? { peerName: message.peer.name } : {}),
       senderId: message.sender.id,
       ...(message.sender.name ? { senderName: message.sender.name } : {}),
+      ...(message.sender.card ? { senderCard: message.sender.card } : {}),
+      ...(message.sender.role ? { senderRole: message.sender.role } : {}),
       time: message.time,
       self: message.self,
       segments: message.segments,

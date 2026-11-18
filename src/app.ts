@@ -24,6 +24,7 @@ import type {
   WebuiContext,
 } from './webui/context.ts';
 import { VERSION } from './version.ts';
+import { SmtpNotifications } from './notify.ts';
 
 const STORAGE_QUOTA = 512 * 1024 * 1024;
 
@@ -50,7 +51,8 @@ export class Application implements WebuiContext {
   readonly paths: RuntimePaths;
   readonly logger: Logger;
   readonly config: ConfigStore;
-  readonly stats = new Stats();
+  readonly stats: Stats;
+  readonly notifications: SmtpNotifications;
   readonly driver: AccountDriver;
   readonly service: OneBotService;
   readonly sessions: Sessions;
@@ -71,6 +73,10 @@ export class Application implements WebuiContext {
     this.logger = new Logger(this.paths, { level: options.logLevel ?? 'info', console: true });
     this.config = new ConfigStore(this.paths, this.logger);
     this.config.load();
+    this.notifications = new SmtpNotifications(this.paths.config, this.logger);
+    // 概览计数属于“账号本次登录”：记录写在 <data>/stats.json，进程重启后继续累计，
+    // 只有登录时间戳变化（账号重新登录）时才清零。
+    this.stats = new Stats({ dataDir: this.paths.data, logger: this.logger });
 
     const driverId = options.driver ?? 'mock';
     this.driver = createDriver(
@@ -90,6 +96,8 @@ export class Application implements WebuiContext {
       driver: this.driver,
       stats: this.stats,
       version: this.version,
+      // numeric message id -> 原生 id 的映射落盘：Fox 重启后 get_msg/引用仍能反查。
+      stateFile: path.join(this.paths.data, 'message-ids.json'),
     });
     this.plugins = new PluginHost(this.paths, this.logger, this.service);
     this.sessions = new Sessions(() => this.config.webui.sessionMinutes);
@@ -112,9 +120,11 @@ export class Application implements WebuiContext {
     await this.plugins.loadAll();
     this.#writeInstanceFile();
     const account = await this.driver.status();
+    this.notifications.state(account.online);
+    this.stats.ensureSession(account.onlineSince ?? 0);
     this.logger.info(
       'app',
-      `DuskFox ${this.version} 已启动 · 驱动 ${this.driver.name} · 账号 ${account.online ? account.uin : '未登录'}`,
+      `duskfox ${this.version} 已启动 · 驱动 ${this.driver.name} · 账号 ${account.online ? account.uin : '未登录'}`,
     );
     this.logger.info('app', `控制台：http://${this.#address.host}:${this.#address.port}`);
     this.logger.info('app', `管理令牌：${this.config.fileOf('webui')}`);
@@ -127,7 +137,10 @@ export class Application implements WebuiContext {
     await this.service.stop();
     await this.#console.stop();
     this.sessions.purge();
-    this.logger.info('app', 'DuskFox 已停止');
+    // 计数是防抖写盘的，退出前同步落盘，避免最后几秒的增量丢失。
+    this.stats.flush();
+    this.notifications.stop();
+    this.logger.info('app', 'duskfox 已停止');
   }
 
   /** Restart transports and the driver, keeping the console socket alive. */
@@ -137,6 +150,7 @@ export class Application implements WebuiContext {
 
   async status(): Promise<StatusPayload> {
     const account = await this.driver.status();
+    this.stats.ensureSession(account.onlineSince ?? 0);
     const snapshot = this.stats.snapshot(this.service.clientCount());
     return {
       app: {
@@ -332,7 +346,10 @@ export class Application implements WebuiContext {
   }
 
   #wireEvents(): void {
-    this.logger.onRecord((record) => this.stream.send('log', record));
+    this.logger.onRecord((record) => {
+      this.stream.send('log', record);
+      if (record.level === 'error' && record.module !== 'notify') this.notifications.runtimeError(`${record.module} 运行错误，请查看控制台日志。`);
+    });
     this.service.onEvent((event) => this.stream.send('event', event));
     this.config.onChange((change) => {
       void this.service.applyConfig(change).catch((error: unknown) => {
@@ -346,7 +363,10 @@ export class Application implements WebuiContext {
     });
     this.#events.on('state', (event) => {
       if (event.type !== 'state') return;
+      // onlineSince 变化说明账号重新登录；离线时为 0，ensureSession 会忽略。
+      this.stats.ensureSession(event.status.onlineSince ?? 0);
       this.service.updateAccount({ online: event.status.online, uin: event.status.uin });
+      this.notifications.state(event.status.online);
       this.stream.send('status', event.status);
     });
     this.#events.on('message', (event) => {

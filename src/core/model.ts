@@ -106,6 +106,8 @@ export interface InboundMessage {
   readonly scene: Scene;
   /** Driver native id, stable enough to recall within the driver's window. */
   readonly messageId: string;
+  /** Native message sequence number when the driver reports one (NapCat real_seq). */
+  readonly seq?: string;
   /** Epoch seconds. */
   readonly time: number;
   /** True when this account is the sender. */

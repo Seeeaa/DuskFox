@@ -11,8 +11,19 @@ export interface EventContext {
   readonly messageIds: MessageIdRegistry;
 }
 
-function base(ctx: EventContext, postType: Ob11EventBase['post_type'], extra: Record<string, unknown>): Ob11EventBase {
-  return { time: Math.floor(Date.now() / 1000), self_id: ctx.selfId(), post_type: postType, ...extra };
+function base(
+  ctx: EventContext,
+  postType: Ob11EventBase['post_type'],
+  extra: Record<string, unknown>,
+  time = Math.floor(Date.now() / 1000),
+): Ob11EventBase {
+  return { time, self_id: ctx.selfId(), post_type: postType, ...extra };
+}
+
+/** 事件 time 用消息自身时间（秒），缺失或非法时才退回到当前时刻。 */
+function messageTime(message: InboundMessage): number {
+  const time = Number(message.time);
+  return Number.isFinite(time) && time > 0 ? Math.floor(time) : Math.floor(Date.now() / 1000);
 }
 
 /**
@@ -40,28 +51,39 @@ export function buildMessageEvent(message: InboundMessage, ctx: EventContext): O
       : segment,
   );
   const common = {
+    // 与 NapCat 对齐的字段：message_seq/real_id/real_seq/user_id 缺了不影响普通收发，
+    // 但部分框架/插件会直接读它们，补上成本很低。
     message_id: numericId,
+    message_seq: numericId,
+    real_id: numericId,
+    real_seq: message.seq || numericId,
     message: formatMessage(segments, format),
     raw_message: toCqString(segments),
-    font: 0,
+    font: 14,
+    // message 字段按 format 序列化，message_format 必须与之一致，否则框架按错格式解析。
+    message_format: format,
     sender,
     ...(config.debug && message.raw !== undefined ? { raw: message.raw } : {}),
   };
   const postType = message.self ? 'message_sent' : 'message';
+  const time = messageTime(message);
   if (message.scene === 'group') {
     return base(ctx, postType, {
       message_type: 'group',
       sub_type: 'normal',
       group_id: Number(message.peer.id) || 0,
+      ...(message.peer.name ? { group_name: message.peer.name } : {}),
+      // NapCat 的群消息事件也带顶层 user_id（发送者 QQ）。
+      user_id: Number(message.sender.id) || 0,
       ...common,
-    });
+    }, time);
   }
   return base(ctx, postType, {
     message_type: 'private',
     sub_type: 'friend',
     user_id: Number(message.peer.id) || 0,
     ...common,
-  });
+  }, time);
 }
 
 /** Notice event, or a lifecycle meta event for session transitions. */

@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import { Application } from './app.ts';
 import { VERSION } from './version.ts';
 
-const HELP = `DuskFox ${VERSION} — QQ → OneBot v11 连接器（Windows / Linux）
+const HELP = `duskfox ${VERSION} — QQ → OneBot v11 连接器（Windows / Linux）
 
 用法：
   duskfox [选项]
@@ -82,6 +82,9 @@ async function main(): Promise<void> {
     ...(port !== undefined ? { webuiPort: port } : {}),
     ...(logLevel ? { logLevel } : {}),
   });
+
+  // 计数是防抖写盘的：进程退出前同步 flush，Fox 重启后计数才能延续。
+  process.once('exit', () => app.stats.flush());
 
   let stopping = false;
   const shutdown = async (signal: string): Promise<void> => {

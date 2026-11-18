@@ -8,6 +8,7 @@ import type { LoadedPlugin } from '../plugins/loader.ts';
 import type { OneBotService } from '../onebot/service.ts';
 import type { Sessions, Tickets } from './auth.ts';
 import type { StreamHub } from './stream.ts';
+import type { SmtpNotifications } from '../notify.ts';
 
 export type CapabilityState = 'yes' | 'partial' | 'no';
 
@@ -116,6 +117,7 @@ export interface WebuiContext {
   readonly sessions: Sessions;
   readonly tickets: Tickets;
   readonly stream: StreamHub;
+  readonly notifications: SmtpNotifications;
 
   status(): Promise<StatusPayload>;
   restart(): Promise<void>;

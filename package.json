@@ -1,6 +1,6 @@
 {
   "name": "duskfox",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Cross-platform QQ to OneBot v11 connector with a web console.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
@@ -29,6 +29,7 @@
   "dependencies": {
     "@sinclair/typebox": "^0.34.41",
     "json5": "^2.2.3",
+    "nodemailer": "^10.6.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {

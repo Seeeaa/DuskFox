@@ -8,10 +8,13 @@ import type { OutboundMessage, Scene, Segment } from '../../core/model.ts';
 interface MessageShape {
   readonly ob11Id: number;
   readonly nativeId: string;
+  readonly selfId: number;
   readonly scene: Scene;
   readonly peerId: string;
   readonly senderId: string;
   readonly senderName?: string;
+  readonly senderCard?: string;
+  readonly senderRole?: 'owner' | 'admin' | 'member';
   readonly time: number;
   readonly segments: readonly Segment[];
   readonly format: 'array' | 'string';
@@ -20,14 +23,29 @@ interface MessageShape {
 /** The exact payload `get_msg` returns, whether from the window or the runtime. */
 function shapeMessage(input: MessageShape): Record<string, unknown> {
   return {
+    // NapCat 的 get_msg 返回的是完整 message 事件形状，框架会直接把它当事件消费，
+    // 只给 8 个字段会让读 post_type/self_id/sub_type 的插件拿不到值。
+    post_type: 'message',
+    self_id: input.selfId,
     message_id: input.ob11Id,
+    message_seq: input.ob11Id,
     real_id: Number(input.nativeId) || 0,
+    real_seq: input.ob11Id,
     message_type: input.scene,
+    sub_type: input.scene === 'group' ? 'normal' : 'friend',
     ...(input.scene === 'group'
       ? { group_id: Number(input.peerId) || 0 }
       : { user_id: Number(input.peerId) || 0 }),
-    sender: { user_id: Number(input.senderId) || 0, nickname: input.senderName ?? '' },
+    sender: {
+      user_id: Number(input.senderId) || 0,
+      nickname: input.senderName ?? '',
+      ...(input.senderCard ? { card: input.senderCard } : {}),
+      ...(input.senderRole ? { role: input.senderRole } : {}),
+    },
     time: input.time,
+    font: 14,
+    // 与 message 的实际序列化格式保持一致。
+    message_format: input.format,
     message: formatMessage(input.segments, input.format),
     raw_message: toCqString(input.segments),
   };
@@ -186,8 +204,11 @@ export const messageActions: Array<ActionDefinition<any, any>> = [
           nativeId: record.nativeId,
           scene: record.scene,
           peerId: record.peerId,
+          selfId: context.selfId(),
           senderId: record.senderId,
           senderName: record.senderName,
+          senderCard: record.senderCard,
+          senderRole: record.senderRole,
           time: record.time,
           segments: record.segments,
           format: context.config.messagePostFormat,
@@ -206,8 +227,11 @@ export const messageActions: Array<ActionDefinition<any, any>> = [
             nativeId: fetched.messageId,
             scene: fetched.scene,
             peerId: fetched.peer.id,
+            selfId: context.selfId(),
             senderId: fetched.sender.id,
             senderName: fetched.sender.name,
+            senderCard: fetched.sender.card,
+            senderRole: fetched.sender.role,
             time: fetched.time,
             segments: fetched.segments,
             format: context.config.messagePostFormat,
