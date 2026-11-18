@@ -23,7 +23,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/linux/Dockerfile.fox
-    image: duskfox-app:1.0.2
+    image: duskfox-app:1.0.3
     restart: unless-stopped
     init: true
     mem_limit: 320m
