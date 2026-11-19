@@ -35,16 +35,15 @@ class NativeKernel {
     this.uin = '';
     this.nick = '';
     this.avatar = '';
-    this.online = false;
     /** 扫码授权完成与消息网络可用是两件事，分开记录。 */
     this.loginSucceeded = false;
+    this.invalidatedSession = null;
     /** getMsfStatus(): 1=断开, 2=已连接。 */
     this.msfStatus = 0;
     /** 最近一条真实入站消息的时间（毫秒），在线判据的活性来源。 */
     this.lastMsgAt = 0;
     this.qrState = 'none';
     this.qrSeq = 0;
-    this.lastReconnectAt = 0;
     this.loggedOut = (() => { try { return require('node:fs').existsSync(logoutMarkerPath()); } catch (error) { return false; } })();
     this.qr = null;
     this.emit = () => {};
@@ -53,7 +52,7 @@ class NativeKernel {
     this.msgService = null;
     this.listenerReady = false;
     this.loginListener = null;
-    this.messageListener = null;
+    this.messageBinding = null;
     this.probe = {
       qrPictures: 0,
       qrScans: 0,
@@ -157,7 +156,6 @@ class NativeKernel {
       '请求事件：operateSysNotify 的 doubt 与 targetMsg 字段',
     ];
     this.attachTimer = null;
-    this.msgTimer = null;
     this.options = options;
   }
 
@@ -165,21 +163,30 @@ class NativeKernel {
 
   async start(emit) {
     this.emit = emit;
-    this.attach();
-    this.attachTimer = setInterval(() => this.attach(), 2000);
+    if (this.attachTimer) return;
+    const observe = () => {
+      this.attach();
+      this.refreshMsf();
+      this.attachMessages();
+    };
+    observe();
+    this.attachTimer = setInterval(observe, 2000);
     this.attachTimer.unref?.();
-    this.msgTimer = setInterval(() => this.attachMessages(), 2000);
-    this.msgTimer.unref?.();
   }
 
   async stop() {
     clearInterval(this.attachTimer);
-    clearInterval(this.msgTimer);
+    this.attachTimer = null;
+    this.msgService = null;
+    this.emit = () => {};
+  }
+
+  get online() {
+    return this.loginSucceeded && Boolean(this.msgService);
   }
 
   refreshMsf() {
     try {
-      // 注意：这里不能 early return，否则下面的在线判定永远不会执行（曾导致 status().online 恒 false）。
       const value = this.loginService ? this.loginService.getMsfStatus() : undefined;
       if (typeof value === 'number') {
         this.msfStatus = value;
@@ -188,10 +195,6 @@ class NativeKernel {
     } catch (error) {
       // 待实机：该方法在部分版本不存在，保留上一次值。
     }
-    // 可用性判据：已授权 + 消息服务在。**空闲不是掉线**。
-    // 审查报告 F：线上 1.0.5 在正常收发时 msf_status 也常为 1；若把"最近 5 分钟没消息"
-    // 当离线，空闲 5 分钟后所有发送都会被 1404 拒绝。活跃度单独用 idleMs 暴露，不参与判定。
-    this.online = Boolean(this.loginSucceeded && this.msgService);
   }
 
   get quickLoginSupported() {
@@ -240,60 +243,46 @@ class NativeKernel {
     this.markOnline();
     clearLogoutMarker();
     this.loginSucceeded = true;
+    this.invalidatedSession = null;
     // 消息服务稍后由 attach 循环补上。
     this.probe.reconnects = (this.probe.reconnects || 0) + 1;
     return { accepted: true };
   }
 
-  /** 掉线后自动快速重连（15s 节流，失败不影响状态查询）。 */
-  #maybeReconnect() {
-    if (this.loggedOut) return;
-    if (this.msgService) return;
-    if (Date.now() - this.lastReconnectAt < 20000) return;
-    this.lastReconnectAt = Date.now();
-    if (!this.quickLoginSupported) return;
-    if (this.loginSucceeded) {
-      Promise.resolve()
-        .then(() => this.quickLogin(this.uin))
-        .catch((error) => { this.probe.lastReconnectError = String(error && error.message ? error.message : error); });
-      return;
-    }
-    // 进程刚重启：登录态丢了，但本机有保存的账号时直接快速登录（NC 行为）。
-    Promise.resolve()
-      .then(() => this.quickList())
-      .then((list) => {
-        const items = Array.isArray(list) ? list : [];
-        const remembered = rememberedAccount();
-        if (remembered) {
-          // 只允许自动登录上次那个机器人号：换成别的号（比如个人的主号）宁可不登录。
-          const hit = items.find((item) => String(item && item.uin) === remembered);
-          this.probe.rememberedAccount = remembered;
-          if (!hit) {
-            this.probe.lastReconnectError = '上次登录的账号 ' + remembered + ' 不在快速登录列表里，等待扫码';
-            return null;
-          }
-          return this.quickLogin(remembered);
-        }
-        const hit = items[0];
-        if (hit && hit.uin) return this.quickLogin(hit.uin);
-        return null;
-      })
-      .catch((error) => { this.probe.lastReconnectError = String(error && error.message ? error.message : error); });
+  invalidateSession() {
+    this.invalidatedSession = this.session;
+    this.loginSucceeded = false;
+    this.msgService = null;
+    this.loginAt = 0;
+    this.qr = null;
+    this.qrState = 'none';
+    clearLoginAt();
+  }
+
+  /**
+   * 绑定是否真的有效：会话、服务对象、监听 id 三者必须同时匹配。
+   * 缓存对象存在不能单独作证（会话可能已换、监听可能已被客户端丢弃）。
+   */
+  bindingValid() {
+    const binding = this.messageBinding;
+    if (!binding || !this.session || !this.msgService) return false;
+    return binding.session === this.session && binding.service === this.msgService && binding.id != null;
   }
 
   status() {
-    this.#maybeReconnect();
-    this.refreshMsf();
+    // authorized 必须有身份事实：登录成功 + 非空数字 uin。否则会出现 authorized 且 self_id=0 的矛盾态。
+    const authorized = Boolean(this.loginSucceeded && /^\d+$/.test(String(this.uin || '')));
     return {
-      uin: this.loginSucceeded ? this.uin : '',
-      loginAt: this.loginSucceeded ? this.loginAt : 0,
-      nick: this.loginSucceeded ? this.nick : '',
+      uin: authorized ? this.uin : '',
+      loginAt: authorized ? this.loginAt : 0,
+      nick: authorized ? this.nick : '',
       // 与 NapCat 一致：头像用 QQ 官方 qlogo 地址，由运行时（原生侧）生成。
-      avatar: this.loginSucceeded && /^\d+$/.test(String(this.uin))
-        ? 'https://q1.qlogo.cn/g?b=qq&nk=' + this.uin + '&s=640'
-        : this.avatar,
+      avatar: authorized ? 'https://q1.qlogo.cn/g?b=qq&nk=' + this.uin + '&s=640' : this.avatar,
       online: this.online,
-      authorized: this.loginSucceeded,
+      // 原始服务位：来自当前绑定，不是"曾经拿到过对象"。
+      messageReady: this.bindingValid(),
+      authorized,
+      accountState: authorized ? 'authorized' : this.loggedOut || this.invalidatedSession ? 'signed_out' : 'unknown',
       msf: this.msfStatus,
       // 空闲时长单独暴露，只供控制台显示，不作为在线判据。
       idleMs: this.lastMsgAt > 0 ? Date.now() - this.lastMsgAt : 0,
@@ -311,7 +300,7 @@ class NativeKernel {
     return {
       ...this.probe,
       loginListenerReady: this.listenerReady,
-      messageListenerReady: Boolean(this.messageListener),
+      messageListenerReady: Boolean(this.msgService),
       // 客户端各版本方法名不完全一样：把可用方法列出来，便于按实机能力降级。
       msgServiceMethods: this.methodsOf(this.msgService),
       groupServiceMethods: this.methodsOf(groupService),
@@ -373,8 +362,8 @@ class NativeKernel {
             if (/^\d+$/.test(uin)) self.uin = uin;
             self.qrState = 'confirmed';
             self.qr = null;
-            // 授权完成 ≠ 消息网络可用；online 由 MSF=2 决定。
             self.loginSucceeded = true;
+            self.invalidatedSession = null;
             // 扫码成功后清掉登出标记：否则下次重启会被判定为已登出，逼用户重新扫码。
             self.loggedOut = false;
             rememberAccount(uin);
@@ -391,8 +380,21 @@ class NativeKernel {
           onLoginFailed() {
             if (!self.online) self.qrState = 'expired';
           },
+          onUserLoggedIn(userId) {
+            const uin = String(userId ?? '');
+            if (!/^\d+$/.test(uin)) return;
+            if (self.uin !== uin) self.loginAt = 0;
+            self.uin = uin;
+            self.loginSucceeded = true;
+            self.invalidatedSession = null;
+            if (self.msgService) self.markOnline();
+          },
           onLoginConnected() { self.probe.loginConnected += 1; },
-          onLoginDisConnected() {},
+          onLoginDisConnected() {
+            self.msgService = null;
+            self.refreshMsf();
+          },
+          onLogoutSucceed() { self.invalidateSession(); },
         },
         {
           get(target, key) {
@@ -430,29 +432,46 @@ class NativeKernel {
 
   // ---------------------------------------------------------------- 会话
 
-  /** 抓取 QQ 自己创建的会话引用（只读）。 */
+  /** 在 QQ 自己创建的会话上维持消息服务绑定。 */
   attachMessages() {
-    if (this.msgService) return;
     try {
-      const wrapper = require('./wrapper.node');
-      const type = wrapper.NodeIQQNTWrapperSession;
-      if (!type) return;
-      const session = this.options.sessionProvider?.() ||
-        (typeof type.getNTWrapperSession === 'function' ? type.getNTWrapperSession('nt_1') : null);
+      const captured = this.options.sessionProvider?.() || this.session;
+      if (!captured && this.options.wrapperObserved && !this.options.wrapperObserved()) return;
+      const session = captured ||
+        require('./wrapper.node').NodeIQQNTWrapperSession?.getNTWrapperSession?.('nt_1');
       this.probe.sessionCaptured = Boolean(session);
-      if (!session || typeof session.getMsgService !== 'function') return;
+      if (!session || session === this.invalidatedSession) return;
+      const previous = this.messageBinding;
       this.session = session;
       const candidate = session.getMsgService();
       this.probe.messageServiceSeen = Boolean(candidate);
-      if (!candidate) return;
+      if (!candidate) {
+        this.msgService = null;
+        return;
+      }
+      // 同一会话可返回新的 JS 服务包装对象。绑定正常时沿用原监听。
+      if (previous?.session === session && this.msgService) {
+        this.attachRequestListeners(session);
+        return;
+      }
+      if (previous?.session === session && previous.service === candidate) {
+        this.msgService = candidate;
+        this.attachRequestListeners(session);
+        return;
+      }
       const self = this;
+      const binding = { session, service: candidate, id: undefined };
+      const active = () => self.session === session && self.messageBinding === binding && self.msgService === candidate;
       const listener = new Proxy({
         onRecvMsg(messages) {
-          if (!Array.isArray(messages)) return;
+          if (!active() || !Array.isArray(messages)) return;
           for (const message of messages) self.onNativeMessage(message);
         },
         onRichMediaDownloadComplete(info) {
-          self.onRichMediaDownloadComplete(info);
+          if (active()) self.onRichMediaDownloadComplete(info);
+        },
+        onKickedOffLine() {
+          if (self.messageBinding === binding && self.session === session) self.invalidateSession();
         },
       }, {
         get(target, key) {
@@ -461,21 +480,30 @@ class NativeKernel {
           return undefined;
         },
       });
-      candidate.addKernelMsgListener(listener);
+      binding.id = candidate.addKernelMsgListener(listener);
+      this.messageBinding = binding;
       this.msgService = candidate;
-      this.messageListener = listener;
-      // 扫码授权后会话已建立，直接进入在线（NC 行为），不等 MSF=2。
+      if (previous && previous.session !== session) {
+        this.buddyListenerReady = false;
+        this.groupListenerReady = false;
+      }
+      this.invalidatedSession = null;
       this.loginSucceeded = true;
-      this.online = true;
       this.markOnline();
       this.attachRequestListeners(session);
-      // 登录后立刻拉一次好友列表，把“自己”的昵称补上（UI 的昵称延迟主要来自这里）。
-      Promise.resolve().then(() => this.friends()).catch(() => {});
-      // 会话捕获不等于可收发；online 由 MSF=2 决定。
-      this.refreshMsf();
+      if (previous?.session !== session) {
+        Promise.resolve().then(() => this.friends()).catch(() => {});
+      }
+      if (previous?.id != null) {
+        try {
+          previous.service.removeKernelMsgListener?.(String(previous.id));
+        } catch (error) {
+          this.probe.lastListenerCleanupError = String(error?.name || 'Error');
+        }
+      }
     } catch (error) {
+      this.msgService = null;
       this.probe.lastAttachError = String(error?.name || 'Error');
-      // 会话尚未建立：下一轮重试。
     }
   }
 
@@ -497,6 +525,7 @@ class NativeKernel {
       try {
         session.getBuddyService().addKernelBuddyListener({
           onBuddyReqChange: (data) => {
+            if (this.session !== session || !this.online) return;
             void this.handleBuddyRequests(data).catch((error) => {
               this.probe.lastBuddyRequestError = String(error?.message || error);
             });
@@ -511,8 +540,11 @@ class NativeKernel {
       try {
         session.getGroupService().addKernelGroupListener({
           // 不同版本回调签名不同：可能是 (list)、({ groupList }) 或 (isRefresh, list)。
-          onGroupListUpdate: (...args) => this.captureGroupListUpdate(args),
+          onGroupListUpdate: (...args) => {
+            if (this.session === session && this.online) this.captureGroupListUpdate(args);
+          },
           onGroupNotifiesUpdated: (_doubt, notifications) => {
+            if (this.session !== session || !this.online) return;
             void this.handleGroupNotifies(notifications).catch((error) => {
               this.probe.lastGroupNotifyError = String(error?.message || error);
             });
@@ -809,7 +841,6 @@ class NativeKernel {
     this.rememberNativeShape(message);
     // 收到真实消息即证明消息通道可用（与 NapCat 一致），不再等 MSF=2。
     this.loginSucceeded = this.loginSucceeded || Boolean(this.session);
-    this.online = true;
     this.markOnline();
     // 自己发出的消息会回显：记录元素类型，用来确认引用/@/图片是否真的进了原生包。
     if (String(this.uin || '') && String(message.senderUin ?? '') === String(this.uin)) {
@@ -876,7 +907,7 @@ class NativeKernel {
    * 有落盘记录且是同一个号就沿用（QQ 容器重启不等于重新登录），否则从现在开始计时。
    */
   markOnline() {
-    if (!this.loginAt) {
+    if (!this.loginAt && this.uin) {
       const saved = readLoginAt();
       this.loginAt = saved && saved.uin && saved.uin === String(this.uin || '') ? saved.at : Date.now();
       writeLoginAt(this.loginAt, String(this.uin || ''));
@@ -1706,6 +1737,7 @@ class NativeKernel {
     if (code === '140022008') throw new Error('需要验证码（proofWaterUrl），当前版本未实现验证码流程');
     if (code === '140022010') throw new Error('新设备需要扫码验证（jumpUrl），请先用扫码登录一次');
     if (code && code !== '0' && code !== 'undefined') throw new Error('密码登录失败：' + code);
+    this.invalidatedSession = null;
     return { accepted: true };
   }
 
@@ -1716,14 +1748,9 @@ class NativeKernel {
     const os = require('node:os');
     const path = require('node:path');
     this.loggedOut = true;
-    this.loginAt = 0;
-    clearLoginAt();
+    this.invalidateSession();
     try { fs.writeFileSync(logoutMarkerPath(), String(Date.now())); } catch (error) { /* 忽略 */ }
-    this.loginSucceeded = false;
-    this.online = false;
-    this.msgService = null;
     this.session = null;
-    this.qrState = 'none';
     setTimeout(() => process.exit(0), 800);
     return { accepted: true };
   }

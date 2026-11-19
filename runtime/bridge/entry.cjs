@@ -89,6 +89,18 @@ process.dlopen = function (...args) {
 
   const port = Number(process.env.QQ_NATIVE_UI_PORT || 16082);
   const host = process.env.QQ_NATIVE_UI_HOST || '127.0.0.1';
-  await bridge.listen(port, host);
-  console.log('[bridge] listening http://' + host + ':' + port + ' mode=native');
+
+  // HTTP can recover independently of the QQ session, native listeners and event ring.
+  const listen = async () => {
+    try {
+      await bridge.listen(port, host);
+      console.log('[bridge] listening http://' + host + ':' + port + ' mode=native');
+    } catch (error) {
+      console.warn('[bridge] cannot listen:', error.message);
+      if (error.code === 'EADDRINUSE' || error.code === 'EADDRNOTAVAIL') retryListen();
+    }
+  };
+  const retryListen = () => setTimeout(listen, 2000).unref();
+  bridge.server.on('close', retryListen);
+  await listen();
 })();

@@ -19,7 +19,9 @@ export declare class NativeKernel {
   loginSucceeded: boolean;
   status(): {
     online: boolean;
+    messageReady: boolean;
     authorized: boolean;
+    accountState: 'authorized' | 'signed_out' | 'unknown';
     msf: number;
     idleMs: number;
     lastMsgAt: number;

@@ -271,9 +271,8 @@ export function createBridgeServer(options) {
     };
   }
 
-  function computePhase() {
-    const status = kernel.status();
-    if (status.online) return 'online';
+  function computePhase(status = kernel.status()) {
+    if (status.online && (status.messageReady ?? true)) return 'online';
     // Authorised but the message network is not up yet: never fall back to QR.
     if (status.authorized) return 'authenticated';
     if (kernel.qrState === 'scanned') return 'confirm_on_phone';
@@ -409,10 +408,10 @@ export function createBridgeServer(options) {
 
   async function pumpQr() {
     if (halted) return;
-    if (kernel.status().online) return;
+    const status = kernel.status();
     // Once the account is authorised there is nothing to scan; requesting more
     // codes only makes the console bounce back to the QR screen.
-    if (kernel.status().authorized) return;
+    if (status.online || status.authorized || status.accountState === 'signed_out') return;
     if (kernel.currentQr() && !kernel.currentQr().expired) return;
     if (!pumpEnabled) return;
     if (qrInFlight) return;
@@ -442,13 +441,17 @@ export function createBridgeServer(options) {
     if (request.method === 'GET' && url.pathname === '/health') return send(200, { ok: true, mode: kernel.mode });
 
     if (url.pathname === '/api/status' && request.method === 'GET') {
-      phase = computePhase();
       const status = kernel.status();
+      phase = computePhase(status);
       return send(200, {
-        message_ready: status.online,
+        // 旧义不改：已授权且消息服务可用，旧读者用它做在线门禁。
+        message_ready: Boolean(status.authorized && status.messageReady),
+        // 新字段：消息服务的原始就绪位，不参与账号状态推断。
+        message_service_ready: Boolean(status.messageReady),
         authorized: Boolean(status.authorized),
+        account_state: status.accountState ?? (status.authorized ? 'authorized' : 'unknown'),
         msf_status: Number(status.msf ?? 0),
-        self_id: status.authorized || status.online ? Number(kernel.uin) : 0,
+        self_id: status.authorized ? Number(kernel.uin) : 0,
         // 账号本次登录的起始时间（毫秒），控制台据此显示持续在线时长。
         login_at: Number((status && status.loginAt) || 0),
         nickname: status.nick,
@@ -851,8 +854,21 @@ export function createBridgeServer(options) {
     },
     async listen(port, host = '127.0.0.1') {
       await new Promise((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(port, host, () => resolve());
+        const onError = (error) => {
+          server.off('error', onError);
+          server.off('listening', onListening);
+          reject(error);
+        };
+        const onListening = () => {
+          server.off('error', onError);
+          resolve();
+        };
+        server.once('error', onError);
+        try {
+          server.listen(port, host, onListening);
+        } catch (error) {
+          onError(error);
+        }
       });
       return server.address();
     },
