@@ -28,6 +28,7 @@ const SEGMENT_FEATURE: Readonly<Record<SegmentKind, string | null>> = {
 };
 import type {
   AccountNotice,
+  AccountSessionState,
   AccountStatus,
   Friend,
   Group,
@@ -49,6 +50,9 @@ interface BridgeStatusPayload {
   readonly message_ready?: boolean;
   /** Login/authorisation finished; the message network may still be down. */
   readonly authorized?: boolean;
+  readonly account_state?: AccountSessionState;
+  /** 消息服务原始就绪位；缺省时回退 message_ready。 */
+  readonly message_service_ready?: boolean;
   /** getMsfStatus(): 1=disconnected, 2=connected. */
   readonly msf_status?: number;
   readonly qr_ready?: boolean;
@@ -127,11 +131,15 @@ export class BridgeDriver implements AccountDriver {
     avatar: '',
     state: 'starting',
     online: false,
+    sessionState: 'unknown',
+    bridgeReachable: false,
+    messageReady: false,
     loginType: 'none',
     detail: '尚未连接桥接服务',
   };
   #qr: QrPayload = { state: 'none', seq: 0 };
   #cursor = 0;
+  #eventInstance = '';
   #started = false;
   #statusTimer: ReturnType<typeof setInterval> | null = null;
   #eventTimer: ReturnType<typeof setInterval> | null = null;
@@ -163,7 +171,7 @@ export class BridgeDriver implements AccountDriver {
   #historyFloor = 0;
   /** 账号这次登录的起始时间（毫秒）：运行时长按它算，而不是按页面打开时间。 */
   #onlineSince = 0;
-  /** 上一次状态是否在线：用来在上线瞬间重置历史消息水位。 */
+  /** 当前 QQ 会话是否已进入消息就绪，用来过滤登录时的历史积压。 */
   #wasOnline = false;
 
   constructor(context: DriverContext, options: DriverOptions) {
@@ -190,7 +198,15 @@ export class BridgeDriver implements AccountDriver {
     if (this.#eventTimer) clearInterval(this.#eventTimer);
     this.#statusTimer = null;
     this.#eventTimer = null;
-    this.#setStatus({ ...this.#status, state: 'offline', online: false, detail: '已停止' });
+    this.#setStatus({
+      ...this.#status,
+      state: 'offline',
+      online: false,
+      sessionState: 'unknown',
+      bridgeReachable: false,
+      messageReady: false,
+      detail: '已停止',
+    });
   }
 
   async status(): Promise<AccountStatus> {
@@ -431,7 +447,7 @@ export class BridgeDriver implements AccountDriver {
     try {
       const payload = await this.#request<BridgeStatusPayload>('/api/status');
       this.#applyLoginMode(payload?.login_mode);
-      if (payload?.phase) this.#phase = payload.phase;
+      this.#phase = payload?.phase ?? '';
       if (typeof payload?.mode === 'string') this.#simulated = payload.mode === 'sim';
       this.#applyFeatures(payload);
       if (Array.isArray(payload?.pending_native) && !this.#pendingReported && payload.pending_native.length > 0) {
@@ -441,51 +457,69 @@ export class BridgeDriver implements AccountDriver {
           `运行时报告 ${payload.pending_native.length} 项待实机验证的原生调用：${payload.pending_native.join('；')}`,
         );
       }
-      const online = Boolean(payload?.message_ready && payload?.self_id);
-      const authorized = Boolean(payload?.authorized);
-      const msf = Number(payload?.msf_status ?? 0);
       const uin = payload?.self_id ? String(payload.self_id) : '';
+      // 新 bridge 给原始服务位，旧 bridge 只有 message_ready（旧义），按可观察事实降级。
+      const messageReady = typeof payload?.message_service_ready === 'boolean'
+        ? payload.message_service_ready
+        : Boolean(payload?.message_ready);
+      const sessionState = payload?.account_state ??
+        (payload?.authorized || (messageReady && uin) ? 'authorized' : 'unknown');
+      const authorized = sessionState === 'authorized';
+      const nativeReady = authorized && messageReady && Boolean(uin);
+      // M8：事件流故障只影响"接收"，不得翻转发送能力与账号状态。
+      // online = 已授权 && 消息服务就绪；事件流健康单独用 detail 与接收侧告警表达。
+      const eventStreamDown = this.#pollFailures >= 3;
+      const online = nativeReady;
+      const waitingFor = messageReady ? '账号身份' : '消息服务';
       // 运行时长以“账号本次登录”为准：桥接侧持久化的 login_at 优先，
       // 这样刷新页面或重启控制台都不会把计时清零。
       const bridgeLoginAt = Number(payload?.login_at ?? 0) || 0;
-      if (online) {
+      if (nativeReady) {
+        const newLogin = bridgeLoginAt > 0 && bridgeLoginAt !== this.#onlineSince;
         if (bridgeLoginAt > 0) this.#onlineSince = bridgeLoginAt;
         else if (!this.#onlineSince) this.#onlineSince = Date.now();
         // 刚上线：QQ 会把离线期间积压的群消息一次性推过来，全部当成“历史”，只放行 5 秒内的新消息。
         // 用驱动启动时间做水位不够——扫码前积压的消息时间晚于启动时间，照样会被当成新指令。
-        if (!this.#wasOnline) {
+        if (!this.#wasOnline || newLogin) {
           this.#wasOnline = true;
           this.#historyFloor = Math.floor((Date.now() - 5000) / 1000);
           this.#context.logger.info('driver:bridge', '账号上线：丢弃上线前的积压消息');
         }
-      } else {
+      } else if (sessionState === 'signed_out') {
         this.#onlineSince = 0;
-        if (this.#wasOnline) this.#wasOnline = false;
+        this.#wasOnline = false;
       }
       const next: AccountStatus = {
         uin: authorized || online ? uin : '',
         nick: authorized || online ? String(payload?.nickname ?? '') : '',
         avatar: authorized || online ? String(payload?.avatar ?? '') : '',
-        // Authorised with the message network down is "logging": signed in but
-        // not able to send yet. It must not look like a fresh, logged-out app.
-        state: online ? 'online' : authorized ? 'logging' : 'offline',
+        state: online ? 'online' : nativeReady ? 'error' : authorized ? 'logging' : 'offline',
         online,
-        loginType: online ? 'session' : authorized ? 'qr' : 'none',
+        sessionState,
+        bridgeReachable: true,
+        messageReady,
+        loginType: nativeReady ? 'session' : authorized ? 'qr' : 'none',
         detail: online
-          ? undefined
-          : authorized
-            ? `已授权，消息网络未连接（MSF=${msf}）`
-            : '桥接服务在线，但 QQ 会话尚未就绪',
-        ...(online && this.#onlineSince ? { onlineSince: this.#onlineSince } : {}),
+          ? eventStreamDown
+            ? `QQ 在线，但事件流连续失败 ${this.#pollFailures} 次：当前只能发送、收不到新消息`
+            : undefined
+          : nativeReady
+            ? 'QQ 会话在线，但消息服务尚未就绪：下发消息会失败，只收不发'
+            : authorized
+              ? `QQ 已授权，正在等待${waitingFor}就绪`
+              : sessionState === 'signed_out'
+                ? 'QQ 会话已退出或失效，请在账号页重新登录'
+                : '桥接服务在线，尚未确认 QQ 登录状态',
+        ...(authorized && this.#onlineSince ? { onlineSince: this.#onlineSince } : {}),
       };
       this.#lastError = '';
       this.#setStatus(next);
-      if (online && Date.now() >= this.#manualReloginUntil) this.#qr = { state: 'none', seq: this.#qr.seq };
-      if (online && !payload?.qr_ready && this.#qr.image && this.#manualReloginUntil > 0) {
+      if (authorized && Date.now() >= this.#manualReloginUntil) this.#qr = { state: 'none', seq: this.#qr.seq };
+      if (nativeReady && !payload?.qr_ready && this.#qr.image && this.#manualReloginUntil > 0) {
         this.#manualReloginUntil = 0;
         this.#qr = { state: 'none', seq: this.#qr.seq };
       }
-      if (!online && payload?.qr_ready && !this.#qr.image) await this.#fetchQr();
+      if (!authorized && payload?.qr_ready && !this.#qr.image) await this.#fetchQr();
       this.#publishQr();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -493,7 +527,19 @@ export class BridgeDriver implements AccountDriver {
         this.#lastError = detail;
         this.#context.logger.warn('driver:bridge', `桥接服务不可用：${detail}`);
       }
-      this.#setStatus({ uin: '', nick: '', avatar: '', state: 'error', online: false, loginType: 'none', detail });
+      this.#phase = 'error';
+      this.#setStatus({
+        uin: '',
+        nick: '',
+        avatar: '',
+        state: 'error',
+        online: false,
+        sessionState: 'unknown',
+        bridgeReachable: false,
+        messageReady: false,
+        loginType: 'none',
+        detail,
+      });
     } finally {
       this.#polling = false;
     }
@@ -550,7 +596,8 @@ export class BridgeDriver implements AccountDriver {
    *   pretending everything arrived.
    */
   async #pollEvents(): Promise<void> {
-    if (!this.#started || !this.#status.online) return;
+    if (!this.#started || !this.#status.bridgeReachable || !this.#status.messageReady ||
+        this.#status.sessionState !== 'authorized' || !this.#status.uin) return;
     if (this.#eventPolling) return;
     this.#eventPolling = true;
     try {
@@ -562,16 +609,16 @@ export class BridgeDriver implements AccountDriver {
         const events = payload?.events ?? [];
         const serverCursor = Number(payload?.cursor ?? this.#cursor);
         const instance = String(payload?.instance ?? '');
-        if (instance && this.#instance && instance !== this.#instance) {
+        if (instance && this.#eventInstance && instance !== this.#eventInstance) {
           this.#context.logger.warn(
             'driver:bridge',
-            `运行时实例已变更（${this.#instance} → ${instance}），重置事件游标并重新同步`,
+            `运行时实例已变更（${this.#eventInstance} → ${instance}），重置事件游标并重新同步`,
           );
-          this.#instance = instance;
+          this.#eventInstance = instance;
           this.#cursor = 0;
           return;
         }
-        if (instance) this.#instance = instance;
+        if (instance) this.#eventInstance = instance;
 
         if (this.#pollFailures > 0) {
           this.#context.logger.info('driver:bridge', `事件轮询已恢复（此前连续失败 ${this.#pollFailures} 次）`);
@@ -811,7 +858,8 @@ export class BridgeDriver implements AccountDriver {
   #composeQr(): QrPayload {
     const seq = this.#qr.seq;
     // Logged in: a previously cached picture is stale, never show it again.
-    if (this.#status.online && Date.now() >= this.#manualReloginUntil) {
+    if ((this.#status.online || (this.#status.sessionState === 'authorized' && this.#status.messageReady)) &&
+        Date.now() >= this.#manualReloginUntil) {
       return { state: 'none', seq, refreshable: this.#qrRefreshable, loginMode: this.#loginMode };
     }
     if (Date.now() < this.#manualReloginUntil && this.#qr.image) {

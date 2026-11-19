@@ -231,6 +231,7 @@ export interface GroupMember {
 }
 
 export type AccountState = 'starting' | 'qr' | 'logging' | 'online' | 'offline' | 'error';
+export type AccountSessionState = 'authorized' | 'signed_out' | 'unknown';
 
 export interface AccountStatus {
   readonly uin: string;
@@ -238,6 +239,9 @@ export interface AccountStatus {
   readonly avatar: string;
   readonly state: AccountState;
   readonly online: boolean;
+  readonly sessionState?: AccountSessionState;
+  readonly bridgeReachable?: boolean;
+  readonly messageReady?: boolean;
   readonly loginType: 'none' | 'qr' | 'quick' | 'password' | 'session';
   readonly detail?: string;
   /** Epoch ms when this account went online (survives console reloads and driver restarts). */
