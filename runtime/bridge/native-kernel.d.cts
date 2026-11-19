@@ -3,7 +3,11 @@
  * 这里只暴露测试实际用到的表面（请求事件映射与 uid→uin 解析）。
  */
 export declare class NativeKernel {
-  constructor(options?: { wrapperObserved?: () => boolean; sessionProvider?: () => unknown });
+  constructor(options?: {
+    wrapperObserved?: () => boolean;
+    sessionProvider?: () => unknown;
+    sessionAccount?: (session: unknown) => { uin: string } | undefined;
+  });
   mode: string;
   uin: string;
   nick: string;

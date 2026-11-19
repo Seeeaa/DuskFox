@@ -24,6 +24,36 @@ const token = process.env.QQ_BRIDGE_TOKEN || fs.readFileSync(tokenFile, 'utf8').
 // logged in; the existing lab bridge verified this capture point in practice.
 let capturedSession = null;
 let wrapperObserved = false;
+const observedSessions = new WeakSet();
+const sessionAccounts = new WeakMap();
+
+function observeSession(session) {
+  if (!session || typeof session.getMsgService !== 'function') return session;
+  if (!sessionAccounts.has(capturedSession)) capturedSession = session;
+  if (observedSessions.has(session) || typeof session.init !== 'function') return session;
+  observedSessions.add(session);
+  const init = session.init;
+  try {
+    Object.defineProperty(session, 'init', {
+      configurable: true,
+      writable: true,
+      value(...args) {
+        const result = Reflect.apply(init, this, args);
+        // The official client supplies the account when it initializes this session.
+        const uin = String(args[0]?.selfUin ?? '');
+        if (/^[1-9]\d{4,11}$/.test(uin)) {
+          sessionAccounts.set(session, { uin });
+          capturedSession = session;
+        }
+        return result;
+      },
+    });
+  } catch (error) {
+    console.warn('[bridge] cannot observe QQ session initialization:', error.message);
+  }
+  return session;
+}
+
 const originalDlopen = process.dlopen;
 process.dlopen = function (...args) {
   const result = Reflect.apply(originalDlopen, this, args);
@@ -37,15 +67,11 @@ process.dlopen = function (...args) {
       get(_target, key) {
         const member = Reflect.get(nativeSessionType, key, nativeSessionType);
         if (typeof member !== 'function' || (key !== 'create' && key !== 'getNTWrapperSession')) return member;
-        return (...callArgs) => {
-          const session = Reflect.apply(member, nativeSessionType, callArgs);
-          if (session && typeof session.getMsgService === 'function') capturedSession = session;
-          return session;
-        };
+        return (...callArgs) => observeSession(Reflect.apply(member, nativeSessionType, callArgs));
       },
       has(_target, key) { return Reflect.has(nativeSessionType, key); },
       getPrototypeOf() { return Reflect.getPrototypeOf(nativeSessionType); },
-      construct(_target, callArgs) { return Reflect.construct(nativeSessionType, callArgs); },
+      construct(_target, callArgs) { return observeSession(Reflect.construct(nativeSessionType, callArgs)); },
     });
     loadedModule.exports = new Proxy({}, {
       get(_target, key) {
@@ -78,12 +104,13 @@ process.dlopen = function (...args) {
   const kernel = new NativeKernel({
     wrapperObserved: () => wrapperObserved,
     sessionProvider: () => capturedSession,
+    sessionAccount: (session) => sessionAccounts.get(session),
   });
   const bridge = createBridgeServer({
     kernel,
     token,
     qrPump: process.env.QQ_BRIDGE_QR_PUMP !== '0',
-    qrCooldownMs: Number(process.env.QQ_BRIDGE_QR_COOLDOWN_MS || 90000),
+    autoQr: false,
   });
   await attachKernelEvents(bridge, kernel);
 

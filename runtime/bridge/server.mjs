@@ -191,7 +191,8 @@ export function createBridgeServer(options) {
   const kernel = options.kernel;
   const logger = options.logger ?? console;
   const token = options.token ?? '';
-  const pumpEnabled = options.qrPump !== false;
+  let qrRefreshEnabled = options.qrPump !== false;
+  const autoQr = options.autoQr ?? (kernel.mode !== 'native');
   const qrCooldownMs = Number(options.qrCooldownMs ?? QR_COOLDOWN_MS);
   const ring = [];
   const instance = 'rt-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
@@ -250,9 +251,9 @@ export function createBridgeServer(options) {
 
   function currentQrPayload() {
     const qr = kernel.currentQr?.() ?? null;
-    const loginMode = pumpEnabled ? 'active' : 'passive';
+    const loginMode = qrRefreshEnabled ? 'active' : 'passive';
     if (!qr) {
-      return { state: phase === 'qr_failed' ? 'expired' : 'unavailable', seq: kernel.qrSeq ?? 0, loginMode };
+      return { state: phase === 'qr_failed' ? 'expired' : 'unavailable', seq: kernel.qrSeq ?? 0, loginMode, refreshable: qrRefreshEnabled };
     }
     if (qr.expired) {
       phase = 'qr_failed';
@@ -267,7 +268,7 @@ export function createBridgeServer(options) {
       seq: qr.seq,
       expiresAt: qr.expiresAt,
       loginMode,
-      refreshable: pumpEnabled,
+      refreshable: qrRefreshEnabled,
     };
   }
 
@@ -407,13 +408,12 @@ export function createBridgeServer(options) {
   }
 
   async function pumpQr() {
-    if (halted) return;
+    if (halted || !qrRefreshEnabled) return;
     const status = kernel.status();
     // Once the account is authorised there is nothing to scan; requesting more
     // codes only makes the console bounce back to the QR screen.
     if (status.online || status.authorized || status.accountState === 'signed_out') return;
     if (kernel.currentQr() && !kernel.currentQr().expired) return;
-    if (!pumpEnabled) return;
     if (qrInFlight) return;
     if (Date.now() - lastQrRequest < qrCooldownMs) return;
     qrInFlight = true;
@@ -458,7 +458,7 @@ export function createBridgeServer(options) {
         avatar: status.avatar,
         version: kernel.version,
         phase,
-        login_mode: pumpEnabled ? 'active' : 'passive',
+        login_mode: qrRefreshEnabled ? 'active' : 'passive',
         qr_ready: Boolean(kernel.currentQr() && !kernel.currentQr().expired),
         mode: kernel.mode,
         contract: contractVersion,
@@ -488,17 +488,20 @@ export function createBridgeServer(options) {
           state: 'none',
           seq: kernel.qrSeq ?? 0,
           refreshable: false,
-          loginMode: pumpEnabled ? 'active' : 'passive',
+          loginMode: qrRefreshEnabled ? 'active' : 'passive',
           hint: '已授权，等待消息网络连接（MSF=' + Number(live.msf ?? 0) + '）；无需再次扫码',
           phase: 'authenticated',
         });
       }
       const payload = currentQrPayload();
       if (!payload.picture) {
-        const hint = payload.state === 'scanned' ? payload.hint : payload.hint ?? '暂无二维码，运行时会在后台请求';
+        const waitingHint = qrRefreshEnabled
+          ? autoQr ? '暂无二维码，运行时会在后台请求' : '请在 QQ 客户端登录，或手动获取二维码'
+          : '请在 QQ 客户端登录';
+        const hint = payload.state === 'scanned' ? payload.hint : payload.hint ?? waitingHint;
         return send(200, { ...payload, hint, phase: computePhase() });
       }
-      return send(200, { ...payload, phase: computePhase(), login_mode: pumpEnabled ? 'active' : 'passive' });
+      return send(200, { ...payload, phase: computePhase(), login_mode: qrRefreshEnabled ? 'active' : 'passive' });
     }
 
     if (url.pathname === '/api/login' && request.method === 'POST') {
@@ -529,7 +532,7 @@ export function createBridgeServer(options) {
 
     if (url.pathname === '/api/qr/refresh' && request.method === 'POST') {
       if (kernel.status().authorized && url.searchParams.get('force') !== '1') return send(409, { error: '账号已授权；如设备已被下线，请在账号页手动选择重新取码' });
-      if (!pumpEnabled) return send(409, { error: '被动模式：请在 QQ 窗口刷新二维码' });
+      if (!qrRefreshEnabled) return send(409, { error: '被动模式：请在 QQ 窗口刷新二维码' });
       try {
         const accepted = await kernel.requestQr();
         lastQrRequest = Date.now();
@@ -822,10 +825,8 @@ export function createBridgeServer(options) {
     });
   });
 
-  const timer = setInterval(() => {
-    void pumpQr();
-  }, 3000);
-  timer.unref?.();
+  const timer = autoQr ? setInterval(() => void pumpQr(), 3000) : null;
+  timer?.unref?.();
 
   return {
     server,
@@ -850,7 +851,7 @@ export function createBridgeServer(options) {
       return computePhase();
     },
     setPump(enabled) {
-      pumpEnabled = enabled;
+      qrRefreshEnabled = enabled;
     },
     async listen(port, host = '127.0.0.1') {
       await new Promise((resolve, reject) => {

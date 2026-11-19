@@ -35,9 +35,10 @@ class NativeKernel {
     this.uin = '';
     this.nick = '';
     this.avatar = '';
-    /** 扫码授权完成与消息网络可用是两件事，分开记录。 */
+    /** 官方 QQ 确认账号身份后，才绑定消息服务。 */
     this.loginSucceeded = false;
     this.invalidatedSession = null;
+    this.sessionAccount = null;
     /** getMsfStatus(): 1=断开, 2=已连接。 */
     this.msfStatus = 0;
     /** 最近一条真实入站消息的时间（毫秒），在线判据的活性来源。 */
@@ -187,8 +188,12 @@ class NativeKernel {
     this.emit = () => {};
   }
 
+  get authorized() {
+    return this.loginSucceeded && /^[1-9]\d{4,11}$/.test(this.uin);
+  }
+
   get online() {
-    return this.loginSucceeded && Boolean(this.msgService);
+    return this.authorized && this.bindingValid();
   }
 
   refreshMsf() {
@@ -242,6 +247,7 @@ class NativeKernel {
     if ((code && code !== '0' && code !== 'undefined') || errMsg) {
       throw new Error('快速登录失败：' + (errMsg || code));
     }
+    if (code !== '0') return { accepted: true };
     this.uin = String(uin);
     this.loggedOut = false;
     rememberAccount(this.uin);
@@ -268,6 +274,7 @@ class NativeKernel {
 
   invalidateSession() {
     this.invalidatedSession = this.session;
+    this.sessionAccount = this.options.sessionAccount?.(this.session) ?? this.sessionAccount;
     this.loginSucceeded = false;
     this.messageBinding = null;
     this.msgService = null;
@@ -288,8 +295,7 @@ class NativeKernel {
   }
 
   status() {
-    // authorized 必须有身份事实：登录成功 + 非空数字 uin。否则会出现 authorized 且 self_id=0 的矛盾态。
-    const authorized = Boolean(this.loginSucceeded && /^\d+$/.test(String(this.uin || '')));
+    const authorized = this.authorized;
     return {
       uin: authorized ? this.uin : '',
       loginAt: authorized ? this.loginAt : 0,
@@ -377,7 +383,8 @@ class NativeKernel {
           onQRCodeLoginSucceed(result) {
             self.probe.qrSuccesses += 1;
             const uin = String((result && result.uin) || '');
-            if (/^\d+$/.test(uin)) self.uin = uin;
+            if (!/^[1-9]\d{4,11}$/.test(uin)) return;
+            self.uin = uin;
             self.qrState = 'confirmed';
             self.qr = null;
             self.loginSucceeded = true;
@@ -402,13 +409,14 @@ class NativeKernel {
           },
           onUserLoggedIn(userId) {
             const uin = String(userId ?? '');
-            if (!/^\d+$/.test(uin)) return;
-            if (self.uin !== uin) self.loginAt = 0;
+            if (!/^[1-9]\d{4,11}$/.test(uin)) return;
+            if (self.uin !== uin || !self.authorized) {
+              self.loginAt = 0;
+              self.invalidateBinding();
+            }
             self.uin = uin;
             self.loginSucceeded = true;
             self.invalidatedSession = null;
-            // 换号/重登后旧绑定不能复用。
-            self.invalidateBinding();
             if (self.msgService) self.markOnline();
           },
           onLoginConnected() { self.probe.loginConnected += 1; },
@@ -465,7 +473,31 @@ class NativeKernel {
       const session = captured ||
         require('./wrapper.node').NodeIQQNTWrapperSession?.getNTWrapperSession?.('nt_1');
       this.probe.sessionCaptured = Boolean(session);
-      if (!session || session === this.invalidatedSession) return;
+      if (!session) return;
+      const account = this.options.sessionAccount?.(session);
+      const newAccount = Boolean(account && account !== this.sessionAccount);
+      if (session === this.invalidatedSession && !newAccount) return;
+      const sessionChanged = this.session !== null && this.session !== session;
+      if (newAccount) {
+        this.sessionAccount = account;
+        if (this.uin !== account.uin || !this.authorized) {
+          this.uin = account.uin;
+          this.nick = '';
+          this.loginAt = 0;
+        }
+        this.loginSucceeded = true;
+        this.invalidatedSession = null;
+        if (this.loggedOut) {
+          this.loggedOut = false;
+          clearLogoutMarker();
+        }
+        this.qr = null;
+        this.qrState = 'confirmed';
+      }
+      if (!this.authorized || (account && account.uin !== this.uin) || (sessionChanged && !account)) {
+        this.msgService = null;
+        return;
+      }
       const previous = this.messageBinding;
       this.session = session;
       const candidate = session.getMsgService();
@@ -478,14 +510,14 @@ class NativeKernel {
       // 唯一复用判据：同一 session + 同一个 service 对象 + 已拿到监听 id。
       // 以前这里还有一条"同会话且有旧 msgService 就复用"的提前返回，它会把同一会话下
       // 客户端换出来的新 service 对象丢掉，导致监听仍留在旧对象上、消息静默丢失。
-      if (previous?.session === session && previous.service === candidate && previous.id != null) {
+      if (!newAccount && previous?.session === session && previous.service === candidate && previous.id != null) {
         this.msgService = candidate;
         this.attachRequestListeners(session);
         return;
       }
       const self = this;
       const binding = { session, service: candidate, id: undefined };
-      const active = () => self.session === session && self.messageBinding === binding && self.msgService === candidate;
+      const active = () => self.online && self.messageBinding === binding;
       const listener = new Proxy({
         onRecvMsg(messages) {
           if (!active() || !Array.isArray(messages)) return;
@@ -507,18 +539,16 @@ class NativeKernel {
       binding.id = candidate.addKernelMsgListener(listener);
       this.messageBinding = binding;
       this.msgService = candidate;
-      if (previous && previous.session !== session) {
+      if (sessionChanged) {
         // 客户端没有成对的 removeKernel*Listener 时接受"每会话一代"，
         // 旧代回调由 this.session 守卫抑制；代数计数进 diagnostics 便于发现泄漏（M6）。
         this.buddyListenerReady = false;
         this.groupListenerReady = false;
         this.probe.listenerGenerations = (this.probe.listenerGenerations || 0) + 1;
       }
-      this.invalidatedSession = null;
-      this.loginSucceeded = true;
       this.markOnline();
       this.attachRequestListeners(session);
-      if (previous?.session !== session) {
+      if (newAccount || previous?.session !== session) {
         Promise.resolve().then(() => this.friends()).catch(() => {});
       }
       if (previous?.id != null) {
@@ -868,8 +898,6 @@ class NativeKernel {
       if (uin && nick) this.nickByUin.set(uin, nick);
     }
     this.rememberNativeShape(message);
-    // 收到真实消息即证明消息通道可用（与 NapCat 一致），不再等 MSF=2。
-    this.loginSucceeded = this.loginSucceeded || Boolean(this.session);
     this.markOnline();
     // 自己发出的消息会回显：记录元素类型，用来确认引用/@/图片是否真的进了原生包。
     if (String(this.uin || '') && String(message.senderUin ?? '') === String(this.uin)) {
@@ -1766,6 +1794,12 @@ class NativeKernel {
     if (code === '140022008') throw new Error('需要验证码（proofWaterUrl），当前版本未实现验证码流程');
     if (code === '140022010') throw new Error('新设备需要扫码验证（jumpUrl），请先用扫码登录一次');
     if (code && code !== '0' && code !== 'undefined') throw new Error('密码登录失败：' + code);
+    if (code === '0' && !res?.loginErrorInfo?.errMsg) {
+      this.uin = String(uin);
+      this.loginSucceeded = true;
+      this.loginAt = 0;
+      this.invalidateBinding();
+    }
     this.invalidatedSession = null;
     return { accepted: true };
   }

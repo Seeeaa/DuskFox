@@ -25,7 +25,7 @@ docker compose -f deploy/linux/compose.yaml exec -T fox node -p "JSON.parse(requ
 docker compose -f deploy/linux/compose.yaml exec -T fox node -p "require('fs').readFileSync('/state/config/onebot.token','utf8')"
 ```
 
-用第一枚令牌进入控制台，在账号页用专用测试 QQ 扫码。第二枚令牌用于 OneBot HTTP/WS 客户端。QQ 桥接令牌单独存放在 `bridge-data` 卷里，不需手动复制到配置。容器以普通用户运行；QQ 桥接端口不发布到宿主机。
+用第一枚令牌进入控制台。官方 QQ 会尝试恢复已有会话。首次登录时，在账号页点手动取码后用专用测试 QQ 扫码。第二枚令牌用于 OneBot HTTP/WS 客户端。QQ 桥接令牌单独存放在 `bridge-data` 卷里，不需手动复制到配置。容器以普通用户运行，QQ 桥接端口只在容器网络内开放。
 
 连接 AstrBot 等框架时，把 OneBot HTTP/WS 地址与第二枚令牌填到对应适配器。若框架也运行在 Docker 容器内，需要让它能访问宿主机的 `13000` 端口，或在控制台网络页配置反向 WebSocket 到该框架可访问的地址。
 
