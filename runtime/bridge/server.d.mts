@@ -3,6 +3,7 @@ export interface BridgeServerOptions {
   logger?: { log?: (message: string) => void; error?: (message: string) => void };
   token?: string;
   qrPump?: boolean;
+  autoQr?: boolean;
   qrCooldownMs?: number;
 }
 

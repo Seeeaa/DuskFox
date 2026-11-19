@@ -39,7 +39,6 @@ $launcher = Join-Path $Target "start-duskfox-test.cmd"
 @'
 @echo off
 setlocal
-set QQ_BRIDGE_QR_PUMP=1
 set QQ_BRIDGE_PASSWORD_LOGIN=1
 set QQ_BRIDGE_IMAGE_SEND=1
 set QQ_NATIVE_UI_PORT=16082

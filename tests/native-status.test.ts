@@ -41,6 +41,40 @@ test('authorized 需要非空数字 uin：否则是 unknown，且身份字段清
   assert.equal(identified.uin, '10001');
 });
 
+test('等官方会话确认账号并提供消息服务后才绑定监听', () => {
+  let account: { uin: string } | undefined;
+  let serviceReads = 0;
+  let listeners = 0;
+  const service = { addKernelMsgListener: () => ++listeners };
+  let ready = false;
+  const session = {
+    getMsgService: () => {
+      serviceReads += 1;
+      return ready ? service : null;
+    },
+    getBuddyService: () => ({ addKernelBuddyListener() {} }),
+    getGroupService: () => ({ addKernelGroupListener() {} }),
+  };
+  const kernel = new NativeKernel({ sessionProvider: () => session, sessionAccount: () => account });
+  Object.assign(kernel, { markOnline() {}, friends: async () => [] });
+
+  kernel.attachMessages();
+  assert.equal(serviceReads, 0);
+  assert.equal(listeners, 0);
+
+  account = { uin: '10001' };
+  kernel.attachMessages();
+  assert.equal(kernel.status().authorized, true);
+  assert.equal(kernel.status().messageReady, false);
+  assert.equal(listeners, 0);
+
+  ready = true;
+  kernel.attachMessages();
+  kernel.attachMessages();
+  assert.equal(kernel.status().online, true);
+  assert.equal(listeners, 1);
+});
+
 test('messageReady 来自当前绑定有效性，不是缓存对象存在', () => {
   const kernel = probe();
   (kernel as any).loginSucceeded = true;

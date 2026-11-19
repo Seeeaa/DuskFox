@@ -127,6 +127,7 @@ test('原生在线判据：已授权 + 消息服务在即在线，空闲 6 分�
   kernel.uin = '10001';
   (kernel as any).loginSucceeded = true;
   kernel.msgService = {};
+  (kernel as any).messageBinding = { session: kernel.session, service: kernel.msgService, id: 'listener-1' };
   kernel.lastMsgAt = Date.now() - 6 * 60_000;
   const status = kernel.status();
   assert.equal(status.online, true, '空闲不等于掉线，否则所有发送会被 1404 拒绝');

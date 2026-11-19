@@ -36,7 +36,6 @@ ENV HOME=/home/node \
     QQ_BRIDGE_DATA_DIR=/bridge-data \
     QQ_NATIVE_UI_HOST=0.0.0.0 \
     QQ_NATIVE_UI_PORT=16082 \
-    QQ_BRIDGE_QR_PUMP=1 \
     QQ_BRIDGE_IMAGE_SEND=1
 
 USER node
