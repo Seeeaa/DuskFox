@@ -3,6 +3,7 @@ import { HttpError, sendJson } from '../http.ts';
 import type { WebuiContext } from '../context.ts';
 import { extractToken, isAdminToken, TICKET_ROUTES } from '../auth.ts';
 import { LoginGuard } from '../auth.ts';
+import { loginFrame } from '../official-view.ts';
 
 /** Auth, status, process control, storage and security routes. */
 export function registerSystemRoutes(router: Router, context: WebuiContext, guard: LoginGuard): void {
@@ -47,7 +48,15 @@ export function registerSystemRoutes(router: Router, context: WebuiContext, guar
   });
 
   router.get('/api/status', async ({ res }) => {
-    sendJson(res, 200, await context.status());
+    const status = await context.status();
+    const officialLogin = process.env.DUSKFOX_OFFICIAL_LOGIN === '1';
+    let officialAccount: Record<string, unknown> | null = null;
+    let officialLoginError = '';
+    if (officialLogin) {
+      try { officialAccount = await loginFrame('account'); }
+      catch (error) { officialLoginError = error instanceof Error ? error.message : String(error); }
+    }
+    sendJson(res, 200, { ...status, officialLogin, officialAccount, officialLoginError });
   });
 
   /** Action table for the console debug page, including what the driver supports. */

@@ -6,7 +6,7 @@ ARG QQ_SHA256=d085dd89397225061eb9f194308f688129818ed445777e97a4a0a16e13d7b0e8
 RUN --mount=type=bind,source=deploy/linux,target=/qq-package,ro \
     apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl xvfb fluxbox dbus-x11 fonts-noto-cjk procps \
-    libgbm1 libasound2 desktop-file-utils \
+    libgbm1 libasound2 desktop-file-utils python3-opencv python3-pyatspi python3-pyzbar libzbar0 gir1.2-gtk-3.0 socat x11vnc xdotool at-spi2-core \
     && if [ -f /qq-package/QQ.deb ]; then \
          cp /qq-package/QQ.deb /tmp/qq.deb; \
        else \
@@ -23,12 +23,16 @@ COPY runtime/bridge/entry.cjs /opt/QQ/resources/app/bridge_entry.cjs
 COPY runtime/bridge/native-kernel.cjs /opt/QQ/resources/app/native-kernel.cjs
 COPY runtime/bridge/server.mjs /opt/QQ/resources/app/server.mjs
 COPY deploy/linux/start-qq.sh /app/start.sh
+COPY runtime/official-login/login_view.py /app/login_view.py
+COPY deploy/linux/start-login-view.sh /app/start-login-view.sh
 
 RUN grep -Fq './application.asar/app_launcher/index.js' /opt/QQ/resources/app/package.json \
     && sed -i 's#\./application.asar/app_launcher/index.js#./bridge_entry.cjs#' /opt/QQ/resources/app/package.json \
-    && chmod 755 /app/start.sh \
-    && mkdir -p /bridge-data /home/node/.config /home/node/.local/share \
-    && chown -R node:node /bridge-data /home/node
+    && sed -i 's/\r$//' /app/start.sh /app/start-login-view.sh \
+    && chmod 755 /app/start.sh /app/start-login-view.sh \
+    && chmod 644 /app/login_view.py \
+    && mkdir -p /bridge-data /run/df-view /home/node/.config /home/node/.local/share \
+    && chown -R node:node /bridge-data /run/df-view /home/node
 
 ENV HOME=/home/node \
     DISPLAY=:99 \

@@ -12,6 +12,9 @@ services:
     volumes:
       - qq-home:/home/node
       - bridge-data:/bridge-data
+      - login-view:/run/df-view
+    environment:
+      QQ_BRIDGE_PASSWORD_LOGIN: "1"
     healthcheck:
       test: ["CMD", "node", "-e", "const s=require('net').connect(16082,'127.0.0.1');s.on('connect',()=>process.exit(0));s.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),2000)"]
       interval: 20s
@@ -37,6 +40,9 @@ services:
     volumes:
       - fox-state:/state
       - bridge-data:/run/bridge:ro
+      - login-view:/run/df-view:ro
+    environment:
+      DUSKFOX_OFFICIAL_LOGIN: "1"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:6099/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 20s
@@ -48,3 +54,4 @@ volumes:
   qq-home:
   bridge-data:
   fox-state:
+  login-view:

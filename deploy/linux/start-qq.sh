@@ -15,4 +15,5 @@ done
 
 eval "$(dbus-launch --sh-syntax)"
 fluxbox >/tmp/duskfox-fluxbox.log 2>&1 &
-exec qq --no-sandbox --disable-gpu --disable-software-rasterizer --disable-gpu-compositing
+/app/start-login-view.sh &
+exec qq --no-sandbox --disable-gpu --disable-software-rasterizer --disable-gpu-compositing --force-renderer-accessibility

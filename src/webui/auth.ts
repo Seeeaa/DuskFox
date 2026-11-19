@@ -54,6 +54,11 @@ export class Sessions {
     this.#sessions.delete(token);
   }
 
+  active(token: string): boolean {
+    const session = this.#sessions.get(token);
+    return !!session && !this.#isExpired(session, Date.now());
+  }
+
   /** 清空全部会话；轮换管理令牌后旧会话必须立即失效。 */
   clear(): void {
     this.#sessions.clear();

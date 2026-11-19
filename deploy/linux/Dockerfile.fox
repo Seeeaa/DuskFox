@@ -8,10 +8,12 @@ RUN npm run build && npm prune --omit=dev --no-audit --no-fund
 
 FROM node:24.22.1-bookworm-slim
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends novnc && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json package-lock.json ./
 COPY webui ./webui
+RUN mkdir -p webui/novnc && cp -rL /usr/share/novnc/core /usr/share/novnc/vendor webui/novnc/
 COPY deploy/linux/launch-fox.mjs ./launch.mjs
 RUN mkdir -p /state && chown node:node /state
 USER node

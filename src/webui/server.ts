@@ -7,6 +7,7 @@ import { createRouter } from './routes/index.ts';
 import { Router, sendJson } from './http.ts';
 import { extractToken, isAdminToken, TICKET_ROUTES } from './auth.ts';
 import { isWithin } from '../core/paths.ts';
+import { attachOfficialView, registerOfficialView } from './official-view.ts';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -51,6 +52,7 @@ export class ConsoleServer {
     this.#context = options.context;
     this.#assetsDir = options.assetsDir;
     this.#router = createRouter(options.context);
+    registerOfficialView(this.#router);
   }
 
   get host(): string {
@@ -64,6 +66,7 @@ export class ConsoleServer {
   async start(host: string, port: number): Promise<{ host: string; port: number }> {
     const server = http.createServer((request, response) => void this.#onRequest(request, response));
     this.#server = server;
+    attachOfficialView(server, this.#context, (request) => this.#accessible(request, new URL('http://localhost/')));
     await new Promise<void>((resolve, reject) => {
       const onError = (error: NodeJS.ErrnoException): void => {
         server.removeListener('listening', onListening);
