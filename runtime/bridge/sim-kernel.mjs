@@ -114,7 +114,18 @@ export class SimKernel {
   async stop() {}
 
   status() {
-    return { uin: this.online ? this.uin : '', nick: this.online ? this.nick : '', avatar: this.online ? this.avatar : '', online: this.online };
+    // 按 03 契约给齐三轴：authorized / message_service_ready / account_state。
+    // 模拟内核的"消息服务"与在线是同一件事，所以两者恒等，不额外推断。
+    return {
+      uin: this.online ? this.uin : '',
+      nick: this.online ? this.nick : '',
+      avatar: this.online ? this.avatar : '',
+      online: this.online,
+      authorized: this.online,
+      messageReady: this.online,
+      accountState: this.online ? 'authorized' : 'unknown',
+      loginAt: 0,
+    };
   }
 
   /** Simulate the QQ window asking the login service for a QR. */

@@ -53,6 +53,8 @@ class NativeKernel {
     this.listenerReady = false;
     this.loginListener = null;
     this.messageBinding = null;
+    /** 软重启标志：stop() 到 start() 之间不建立新绑定（M7）。 */
+    this.stopped = false;
     this.probe = {
       qrPictures: 0,
       qrScans: 0,
@@ -164,6 +166,7 @@ class NativeKernel {
   async start(emit) {
     this.emit = emit;
     if (this.attachTimer) return;
+    this.stopped = false;
     const observe = () => {
       this.attach();
       this.refreshMsf();
@@ -177,7 +180,10 @@ class NativeKernel {
   async stop() {
     clearInterval(this.attachTimer);
     this.attachTimer = null;
-    this.msgService = null;
+    // 软重启：停止期间不再新增绑定；旧绑定置为待重绑，
+    // 期间到达的消息允许丢弃（emit 已置空），start 后必然重绑一次。
+    this.stopped = true;
+    this.invalidateBinding();
     this.emit = () => {};
   }
 
@@ -244,14 +250,26 @@ class NativeKernel {
     clearLogoutMarker();
     this.loginSucceeded = true;
     this.invalidatedSession = null;
+    // 消息服务稍后由 attach 循环补上；旧绑定先作废。
+    this.invalidateBinding();
     // 消息服务稍后由 attach 循环补上。
     this.probe.reconnects = (this.probe.reconnects || 0) + 1;
     return { accepted: true };
   }
 
+  /**
+   * 让消息绑定失效，但账号本身不一定失效。
+   * 重登/换号/断开后必须走这里，下一次 attach 才会重新装监听。
+   */
+  invalidateBinding() {
+    this.messageBinding = null;
+    this.msgService = null;
+  }
+
   invalidateSession() {
     this.invalidatedSession = this.session;
     this.loginSucceeded = false;
+    this.messageBinding = null;
     this.msgService = null;
     this.loginAt = 0;
     this.qr = null;
@@ -364,6 +382,8 @@ class NativeKernel {
             self.qr = null;
             self.loginSucceeded = true;
             self.invalidatedSession = null;
+            // 同一会话可能被复用，登录成功后旧监听一律作废，下一轮 attach 重绑。
+            self.invalidateBinding();
             // 扫码成功后清掉登出标记：否则下次重启会被判定为已登出，逼用户重新扫码。
             self.loggedOut = false;
             rememberAccount(uin);
@@ -387,11 +407,14 @@ class NativeKernel {
             self.uin = uin;
             self.loginSucceeded = true;
             self.invalidatedSession = null;
+            // 换号/重登后旧绑定不能复用。
+            self.invalidateBinding();
             if (self.msgService) self.markOnline();
           },
           onLoginConnected() { self.probe.loginConnected += 1; },
           onLoginDisConnected() {
-            self.msgService = null;
+            // 只清 msgService 会让重连后复用旧监听（客户端可能已丢弃它），必须让绑定一起失效。
+            self.invalidateBinding();
             self.refreshMsf();
           },
           onLogoutSucceed() { self.invalidateSession(); },
@@ -434,6 +457,8 @@ class NativeKernel {
 
   /** 在 QQ 自己创建的会话上维持消息服务绑定。 */
   attachMessages() {
+    // 软重启停止期间不建立新绑定（M7）。
+    if (this.stopped) return;
     try {
       const captured = this.options.sessionProvider?.() || this.session;
       if (!captured && this.options.wrapperObserved && !this.options.wrapperObserved()) return;
@@ -446,15 +471,14 @@ class NativeKernel {
       const candidate = session.getMsgService();
       this.probe.messageServiceSeen = Boolean(candidate);
       if (!candidate) {
-        this.msgService = null;
+        // 服务对象消失：绑定一并作废，等它回来时重绑，避免复用可能已被丢弃的监听（M3）。
+        this.invalidateBinding();
         return;
       }
-      // 同一会话可返回新的 JS 服务包装对象。绑定正常时沿用原监听。
-      if (previous?.session === session && this.msgService) {
-        this.attachRequestListeners(session);
-        return;
-      }
-      if (previous?.session === session && previous.service === candidate) {
+      // 唯一复用判据：同一 session + 同一个 service 对象 + 已拿到监听 id。
+      // 以前这里还有一条"同会话且有旧 msgService 就复用"的提前返回，它会把同一会话下
+      // 客户端换出来的新 service 对象丢掉，导致监听仍留在旧对象上、消息静默丢失。
+      if (previous?.session === session && previous.service === candidate && previous.id != null) {
         this.msgService = candidate;
         this.attachRequestListeners(session);
         return;
@@ -484,8 +508,11 @@ class NativeKernel {
       this.messageBinding = binding;
       this.msgService = candidate;
       if (previous && previous.session !== session) {
+        // 客户端没有成对的 removeKernel*Listener 时接受"每会话一代"，
+        // 旧代回调由 this.session 守卫抑制；代数计数进 diagnostics 便于发现泄漏（M6）。
         this.buddyListenerReady = false;
         this.groupListenerReady = false;
+        this.probe.listenerGenerations = (this.probe.listenerGenerations || 0) + 1;
       }
       this.invalidatedSession = null;
       this.loginSucceeded = true;
@@ -498,7 +525,9 @@ class NativeKernel {
         try {
           previous.service.removeKernelMsgListener?.(String(previous.id));
         } catch (error) {
+          // 卸载 API 的真实签名未实机验证；失败允许，但必须能被诊断看到（M5）。
           this.probe.lastListenerCleanupError = String(error?.name || 'Error');
+          this.probe.listenerCleanupFailures = (this.probe.listenerCleanupFailures || 0) + 1;
         }
       }
     } catch (error) {

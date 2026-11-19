@@ -665,12 +665,12 @@ export class BridgeDriver implements AccountDriver {
       if (this.#pollFailures === 1 || this.#pollFailures % 10 === 0) {
         this.#context.logger.warn('driver:bridge', `事件轮询失败 ${this.#pollFailures} 次：${detail}`);
       }
+      // M8：事件流故障只影响接收。不得把 online 置 false——那会让发送被
+      // "账号未登录"拒绝，并可能误发掉线邮件。只更新 detail，接收侧告警由日志承担。
       if (this.#pollFailures >= 3 && this.#status.online) {
         this.#setStatus({
           ...this.#status,
-          online: false,
-          state: 'error',
-          detail: `事件轮询连续失败 ${this.#pollFailures} 次，消息连接可能已断开`,
+          detail: `QQ 在线，但事件流连续失败 ${this.#pollFailures} 次：当前只能发送、收不到新消息`,
         });
       }
     } finally {
