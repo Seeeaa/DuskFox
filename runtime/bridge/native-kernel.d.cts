@@ -31,6 +31,12 @@ export declare class NativeKernel {
     loginAt: number;
   };
   onNativeMessage(message: unknown): void;
+  attachMessages(): void;
+  start(emit: (event: unknown) => void): Promise<void>;
+  stop(): Promise<void>;
+  bindingValid(): boolean;
+  invalidateBinding(): void;
+  invalidateSession(): void;
   getMessage(msgId: string): Promise<any>;
   /** 文件/视频出站：RichMedia 复制 + 元素构造。 */
   buildFileElement(rawFile: string, rawName?: string): Promise<any>;
