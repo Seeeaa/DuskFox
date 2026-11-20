@@ -21,6 +21,16 @@ OneBot 的 HTTP 和 WebSocket 默认开在本机 13000，把地址和配置里�
 
 构建时会从 QQ 官方地址下载固定版本的客户端，所以要能连外网。下载不通的话，可以参考 deploy/linux/README.md 自己放一份同版本的 QQ.deb。
 
+## 界面
+
+左边是导航，右边是内容，概览页这一屏就能看出运行状态。
+
+<img src="docs/screenshots/02-overview.png" width="880" alt="控制台总览">
+
+关于页列出当前版本、支持的能力，以及运行时信息。
+
+<img src="docs/screenshots/11-about.png" width="880" alt="关于页">
+
 ## 现在能用的部分
 
 文字、图片、语音、文件、视频和合并转发都已经接上，消息 ID、统计、请求事件、扫码状态这些也在。每项功能在真实 QQ 上验证到什么程度，以 docs/feature-gap.md 为准，那里写的是实际情况。
