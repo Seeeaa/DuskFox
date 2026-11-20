@@ -25,11 +25,11 @@ OneBot 的 HTTP 和 WebSocket 默认开在本机 13000，把地址和配置里�
 
 左边是导航，右边是内容，概览页这一屏就能看出运行状态。
 
-<img src="docs/screenshots/02-overview.png" width="880" alt="控制台总览">
+<img src="docs/screenshots/overview.png" width="880" alt="控制台总览">
 
 关于页列出当前版本、支持的能力，以及运行时信息。
 
-<img src="docs/screenshots/11-about.png" width="880" alt="关于页">
+<img src="docs/screenshots/about.png" width="880" alt="关于页">
 
 ## 现在能用的部分
 
