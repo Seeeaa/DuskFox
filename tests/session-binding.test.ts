@@ -32,15 +32,15 @@ function harness() {
   };
   const session: any = {
     getMsgService: () => current,
-    getBuddyService: () => ({ addKernelBuddyListener() {} }),
-    getGroupService: () => ({ addKernelGroupListener() {} }),
+    getBuddyService: () => ({ addKernelBuddyListener() { } }),
+    getGroupService: () => ({ addKernelGroupListener() { } }),
     getProfileService: () => ({ getUserDetailInfoByUin: async () => ({}) }),
   };
   const kernel = new NativeKernel({ sessionProvider: () => session });
-  kernel.emit = () => {};
+  kernel.state.emit = () => { };
   kernel.onNativeMessage = (message: any) => { delivered.push(String(message.msgId)); };
-  kernel.uin = '10001';
-  kernel.loginSucceeded = true;
+  kernel.state.uin = '10001';
+  kernel.state.loginSucceeded = true;
   return {
     kernel,
     sockets,
@@ -56,7 +56,7 @@ test('同会话换新 service 对象：必须重绑，旧监听不投递、新�
   const first = h.makeService();
   h.setService(first);
   h.kernel.attachMessages();
-  assert.equal(h.kernel.msgService, first);
+  assert.equal(h.kernel.state.msgService, first);
   const firstSocket = h.socketFor(first)!;
   assert.ok(firstSocket);
 
@@ -64,7 +64,7 @@ test('同会话换新 service 对象：必须重绑，旧监听不投递、新�
   h.setService(second);
   h.kernel.attachMessages();
 
-  assert.equal(h.kernel.msgService, second, '同会话换对象必须重绑（M1）');
+  assert.equal(h.kernel.state.msgService, second, '同会话换对象必须重绑（M1）');
   assert.equal(second.added, 1, '新 service 必须装一次监听');
 
   firstSocket.listener.onRecvMsg([{ msgId: 'old-1' }]);
@@ -100,7 +100,7 @@ test('服务对象消失再回来：重绑而不是复用旧监听', () => {
 
   h.setService(null);
   h.kernel.attachMessages();
-  assert.equal(h.kernel.msgService, null);
+  assert.equal(h.kernel.state.msgService, null);
   assert.equal(h.kernel.status().messageReady, false, '服务消失后 messageReady 必须为 false');
 
   h.setService(service);
@@ -118,8 +118,8 @@ test('stop 期间不建立绑定，start 后必然重绑一次', async () => {
 
   await h.kernel.stop();
   h.kernel.attachMessages();
-  assert.equal(h.kernel.msgService, null, 'stop 期间不得建立新绑定（M7）');
+  assert.equal(h.kernel.state.msgService, null, 'stop 期间不得建立新绑定（M7）');
 
-  await h.kernel.start(() => {});
+  await h.kernel.start(() => { });
   assert.equal(service.added, 2, 'start 后必须重绑');
 });

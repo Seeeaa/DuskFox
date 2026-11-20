@@ -27,205 +27,20 @@ export function unescapeCq(value: string): string {
   return output;
 }
 
-/** Which internal segment type maps to which OneBot segment type. */
-const INTERNAL_TO_OB11: Record<string, string> = {
-  text: 'text',
-  face: 'face',
-  image: 'image',
-  at: 'at',
-  reply: 'reply',
-  record: 'record',
-  video: 'video',
-  file: 'file',
-  json: 'json',
-  markdown: 'markdown',
-  forward: 'forward',
-};
 
-const OB11_TO_INTERNAL = new Set(Object.values(INTERNAL_TO_OB11));
+/** Structural aliases retained for callers. Neither function rewrites segment data. */
+export function toOb11Segment(segment: Segment): Ob11Segment { return segment; }
+export function fromOb11Segment(segment: Ob11Segment): Segment { return segment; }
 
-/** Internal segment -> OneBot segment. Unknown types are preserved verbatim. */
-export function toOb11Segment(segment: Segment): Ob11Segment {
-  switch (segment.type) {
-    case 'text':
-      return { type: 'text', data: { text: segment.text } };
-    case 'face':
-      return { type: 'face', data: { id: segment.id } };
-    case 'image': {
-      const data: Record<string, unknown> = { file: segment.file };
-      if (segment.url) data.url = segment.url;
-      if (segment.summary) data.summary = segment.summary;
-      return { type: 'image', data };
-    }
-    case 'at':
-      return { type: 'at', data: { qq: segment.target, ...(segment.name ? { name: segment.name } : {}) } };
-    case 'reply':
-      return { type: 'reply', data: { id: segment.id } };
-    case 'record': {
-      const data: Record<string, unknown> = { file: segment.file };
-      // NapCat 习惯额外给 path / file_size，AstrBot 在 file 只是文件名时会用 path。
-      if (segment.url) data.url = segment.url;
-      if (segment.path) data.path = segment.path;
-      if (segment.size !== undefined) data.file_size = segment.size;
-      return { type: 'record', data };
-    }
-    case 'video': {
-      const data: Record<string, unknown> = { file: segment.file };
-      if (segment.url) data.url = segment.url;
-      if (segment.path) data.path = segment.path;
-      if (segment.name) data.file_name = segment.name;
-      if (segment.size !== undefined) data.file_size = segment.size;
-      if (segment.duration !== undefined) data.duration = segment.duration;
-      return { type: 'video', data };
-    }
-    case 'file': {
-      const data: Record<string, unknown> = { file: segment.file };
-      if (segment.name) data.name = segment.name;
-      if (segment.path) data.path = segment.path;
-      if (segment.size !== undefined) data.file_size = segment.size;
-      if (segment.url) data.url = segment.url;
-      return { type: 'file', data };
-    }
-    case 'json':
-      return { type: 'json', data: { data: segment.data } };
-    case 'markdown':
-      return { type: 'markdown', data: { content: segment.content } };
-    case 'forward':
-      return { type: 'forward', data: { id: segment.id } };
-    default: {
-      // Never silently drop a segment: keep the original type and payload so a
-      // bot can at least see that something unsupported arrived.
-      const kind = segment.type === 'unknown' ? segment.kind : 'unknown';
-      const raw = segment.type === 'unknown' ? segment.raw : undefined;
-      return { type: kind, data: raw && typeof raw === 'object' ? { ...(raw as Record<string, unknown>) } : {} };
-    }
-  }
-}
-
-/** OneBot segment -> internal segment. Throws on shapes the driver cannot use. */
-export function fromOb11Segment(segment: Ob11Segment): Segment {
-  const type = String(segment?.type ?? '');
-  const data = (segment?.data ?? {}) as Record<string, unknown>;
-  switch (type) {
-    case 'text':
-      return { type: 'text', text: String(data.text ?? '') };
-    case 'face':
-      return { type: 'face', id: String(data.id ?? '') };
-    case 'image':
-      return {
-        type: 'image',
-        file: String(data.file ?? data.url ?? ''),
-        ...(data.url ? { url: String(data.url) } : {}),
-        ...(data.summary ? { summary: String(data.summary) } : {}),
-      };
-    case 'at': {
-      const target = String(data.qq ?? '');
-      return { type: 'at', target: target === 'all' ? 'all' : target, ...(data.name ? { name: String(data.name) } : {}) };
-    }
-    case 'reply':
-      return { type: 'reply', id: String(data.id ?? '') };
-    case 'record':
-      return {
-        type: 'record',
-        file: String(data.file ?? data.url ?? ''),
-        ...(data.url ? { url: String(data.url) } : {}),
-        ...(data.path ? { path: String(data.path) } : {}),
-        ...(data.file_size !== undefined ? { size: Number(data.file_size) } : {}),
-      };
-    case 'video':
-      return {
-        type: 'video',
-        file: String(data.file ?? data.url ?? ''),
-        ...(data.url ? { url: String(data.url) } : {}),
-        ...(data.path ? { path: String(data.path) } : {}),
-        ...(data.file_name ? { name: String(data.file_name) } : {}),
-        ...(data.file_size !== undefined ? { size: Number(data.file_size) } : {}),
-        ...(data.duration !== undefined ? { duration: Number(data.duration) } : {}),
-      };
-    case 'file':
-      return {
-        type: 'file',
-        file: String(data.file ?? data.url ?? ''),
-        ...(data.name ? { name: String(data.name) } : {}),
-        ...(data.path ? { path: String(data.path) } : {}),
-        ...(data.file_size !== undefined ? { size: Number(data.file_size) } : {}),
-        ...(data.url ? { url: String(data.url) } : {}),
-      };
-    case 'json':
-      return { type: 'json', data: typeof data.data === 'string' ? data.data : JSON.stringify(data.data ?? {}) };
-    case 'markdown':
-      return { type: 'markdown', content: String(data.content ?? data.data ?? '') };
-    case 'forward': {
-      // 合并转发：只有 id 时靠 get_forward_msg 展开；带 content 时直接带上节点。
-      const content = Array.isArray(data.content)
-        ? data.content.map((node) => {
-            const item = (node ?? {}) as Record<string, unknown>;
-            const raw = item.message ?? item.content ?? item.data;
-            return {
-              userId: String(item.user_id ?? item.uin ?? ''),
-              ...(item.nickname || item.name ? { nickname: String(item.nickname ?? item.name) } : {}),
-              time: Number(item.time ?? 0) || 0,
-              segments: Array.isArray(raw) ? raw.map((segment) => fromOb11Segment(segment as Ob11Segment)) : [],
-            };
-          })
-        : undefined;
-      return {
-        type: 'forward',
-        id: String(data.id ?? ''),
-        ...(content && content.length > 0 ? { content } : {}),
-      };
-    }
-    default:
-      if (OB11_TO_INTERNAL.has(type)) return { type: 'text', text: '' };
-      return { type: 'unknown', kind: type, raw: segment };
-  }
-}
-
-/** Rendered CQ string used for `raw_message` and string format messages. */
+/** CQ is only a serialization format. Array-form messages retain every extension field. */
 export function toCqString(segments: readonly Segment[]): string {
-  return segments
-    .map((segment) => {
-      switch (segment.type) {
-        case 'text':
-          return escapeCq(segment.text);
-        case 'face':
-          return `[CQ:face,id=${segment.id}]`;
-        case 'image': {
-          const parts = [`file=${escapeCq(segment.file)}`];
-          if (segment.url) parts.push(`url=${escapeCq(segment.url)}`);
-          if (segment.summary) parts.push(`summary=${escapeCq(segment.summary)}`);
-          return `[CQ:image,${parts.join(',')}]`;
-        }
-        case 'at':
-          return `[CQ:at,qq=${escapeCq(segment.target)}]`;
-        case 'reply':
-          return `[CQ:reply,id=${segment.id}]`;
-        case 'record': {
-          const parts = [`file=${escapeCq(segment.file)}`];
-          if (segment.url) parts.push(`url=${escapeCq(segment.url)}`);
-          return `[CQ:record,${parts.join(',')}]`;
-        }
-        case 'video':
-          return `[CQ:video,file=${escapeCq(segment.file)}]`;
-        case 'file': {
-          const parts = [`file=${escapeCq(segment.file)}`];
-          if (segment.name) parts.push(`name=${escapeCq(segment.name)}`);
-          if (segment.size !== undefined) parts.push(`file_size=${segment.size}`);
-          return `[CQ:file,${parts.join(',')}]`;
-        }
-        case 'json':
-          return `[CQ:json,data=${escapeCq(segment.data)}]`;
-        case 'markdown':
-          return `[CQ:markdown,content=${escapeCq(segment.content)}]`;
-        case 'forward':
-          return `[CQ:forward,id=${escapeCq(segment.id)}]`;
-        default: {
-          const kind = segment.type === 'unknown' ? segment.kind : 'unknown';
-          return `[CQ:${escapeCq(kind)}]`;
-        }
-      }
-    })
-    .join('');
+  return segments.map(segment => {
+    if (segment.type === 'text') return escapeCq(String(segment.data.text ?? ''));
+    const fields = Object.entries(segment.data)
+      .filter(([, value]) => value !== undefined && value !== null)
+      .map(([key, value]) => key + '=' + escapeCq(typeof value === 'object' ? JSON.stringify(value) : String(value)));
+    return '[CQ:' + segment.type + (fields.length ? ',' + fields.join(',') : '') + ']';
+  }).join('');
 }
 
 interface ParsedCq {
@@ -253,7 +68,7 @@ export function parseCqString(input: string): Segment[] {
   let index = 0;
   const flush = (): void => {
     if (buffer) {
-      segments.push({ type: 'text', text: unescapeCq(buffer) });
+      segments.push({ type: 'text', data: { text: unescapeCq(buffer) } });
       buffer = '';
     }
   };
@@ -298,7 +113,7 @@ export function parseCqString(input: string): Segment[] {
 }
 
 /**
- * Normalise whatever a bot sent into internal segments.
+ * Read CQ strings or accept existing segment arrays.
  * Accepts segment arrays, CQ strings and plain strings.
  */
 export function parseMessage(message: Ob11Message | undefined | null): Segment[] {
@@ -316,8 +131,7 @@ export function parseMessage(message: Ob11Message | undefined | null): Segment[]
   return segments;
 }
 
-/** Render internal segments for a bot, honouring the configured format. */
+
 export function formatMessage(segments: readonly Segment[], format: 'array' | 'string'): Ob11Message {
-  if (format === 'string') return toCqString(segments);
-  return segments.map(toOb11Segment);
+  return format === 'string' ? toCqString(segments) : segments as Ob11Segment[];
 }

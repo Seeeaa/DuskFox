@@ -95,7 +95,7 @@ export class SimKernel {
     this.qrSeq = 0;
     this.qrState = 'none';
     this.seq = 0;
-    this.emit = () => {};
+    this.emit = () => { };
     this.sent = [];
     this.requests = [];
     this.fault = null;
@@ -111,7 +111,7 @@ export class SimKernel {
     this.emit = emit;
   }
 
-  async stop() {}
+  async stop() { }
 
   status() {
     // 按 03 契约给齐三轴：authorized / message_service_ready / account_state。

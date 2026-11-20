@@ -87,6 +87,7 @@ export class ConsoleServer {
     const address = server.address();
     this.#host = typeof address === 'object' && address ? address.address : host;
     this.#port = typeof address === 'object' && address ? address.port : port;
+    this.#context.service.media.bind(this.#host, this.#port);
     this.#context.logger.info('webui', `控制台已监听 http://${this.#host}:${this.#port}`);
     return { host: this.#host, port: this.#port };
   }
@@ -100,6 +101,7 @@ export class ConsoleServer {
   }
 
   async #onRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (await this.#context.service.media.handle(request, response)) return;
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
     if (url.pathname.startsWith('/api/')) {
       if (!this.#accessible(request, url)) {

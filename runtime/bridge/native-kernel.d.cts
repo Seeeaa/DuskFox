@@ -9,18 +9,13 @@ export declare class NativeKernel {
     sessionAccount?: (session: unknown) => { uin: string } | undefined;
   });
   mode: string;
+  readonly state: Record<string, any>;
   uin: string;
   nick: string;
-  session: any;
-  probe: Record<string, any>;
-  emit(event: unknown): void;
   handleBuddyRequests(data: unknown): Promise<void>;
   handleGroupNotifies(notifications: unknown[]): Promise<void>;
   resolveUin(uid: string): Promise<string>;
   uinOfUid(uid: string): string;
-  msgService: any;
-  lastMsgAt: number;
-  loginSucceeded: boolean;
   status(): {
     online: boolean;
     messageReady: boolean;
@@ -41,7 +36,10 @@ export declare class NativeKernel {
   bindingValid(): boolean;
   invalidateBinding(): void;
   invalidateSession(): void;
-  getMessage(msgId: string): Promise<any>;
+  getMessage(msgId: string, peer?: { chatType: number; peerUid: string; guildId: string }): Promise<any>;
+  cacheMessage(message: any): any;
+  configureOutbound(config: Record<string, unknown>): Record<string, unknown>;
+  outboundStatus(): Record<string, unknown>;
   /** 文件/视频出站：RichMedia 复制 + 元素构造。 */
   buildFileElement(rawFile: string, rawName?: string): Promise<any>;
   buildVideoElement(rawFile: string, rawName?: string, duration?: number): Promise<any>;

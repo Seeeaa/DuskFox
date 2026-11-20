@@ -55,7 +55,7 @@ function observeSession(session) {
 }
 
 const originalDlopen = process.dlopen;
-process.dlopen = function (...args) {
+process.dlopen = function(...args) {
   const result = Reflect.apply(originalDlopen, this, args);
   const [loadedModule, filename] = args;
   if (path.basename(String(filename)) !== 'wrapper.node' || wrapperObserved) return result;
@@ -63,7 +63,7 @@ process.dlopen = function (...args) {
   const nativeExports = loadedModule.exports;
   const nativeSessionType = nativeExports.NodeIQQNTWrapperSession;
   if (nativeSessionType) {
-    const sessionFacade = new Proxy(function () {}.bind(null), {
+    const sessionFacade = new Proxy(function() { }.bind(null), {
       get(_target, key) {
         const member = Reflect.get(nativeSessionType, key, nativeSessionType);
         if (typeof member !== 'function' || (key !== 'create' && key !== 'getNTWrapperSession')) return member;

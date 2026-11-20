@@ -5,6 +5,7 @@ import type { AccountDriver } from '../driver/types.ts';
 import type { InboundMessage } from '../core/model.ts';
 import { MessageIdRegistry } from '../core/message-id.ts';
 import { MessageStore } from '../core/message-store.ts';
+import { MediaAccess } from './media.ts';
 import { createActionRegistry } from './actions/index.ts';
 import type { ActionRegistry } from './actions/registry.ts';
 import { buildHeartbeatEvent, buildLifecycleEvent, buildMessageEvent, buildNoticeEvent, buildRequestEvent } from './events.ts';
@@ -45,6 +46,7 @@ export class OneBotService {
   readonly messageIds: MessageIdRegistry;
   /** Recent messages, backing `get_msg`. */
   readonly messages = new MessageStore();
+  readonly media: MediaAccess;
   readonly #logger: Logger;
   readonly #config: ConfigStore;
   readonly #driver: AccountDriver;
@@ -59,6 +61,38 @@ export class OneBotService {
   #online = false;
   #selfId = 0;
   #running = false;
+  #outboundSync: Promise<Record<string, unknown>> | null = null;
+
+  async syncOutbound(): Promise<Record<string, unknown>> {
+    if (!this.#driver.configureOutbound) throw new Error('当前驱动不提供出站配置');
+    if (!this.#outboundSync) {
+      const push = async (): Promise<Record<string, unknown>> => {
+        let result: Record<string, unknown>;
+        let sent: string;
+        do {
+          const next = { ...this.#config.outbound };
+          sent = JSON.stringify(next);
+          result = await this.#driver.configureOutbound!(next);
+        } while (sent !== JSON.stringify(this.#config.outbound));
+        return result;
+      };
+      this.#outboundSync = push().finally(() => { this.#outboundSync = null; });
+    }
+    return this.#outboundSync;
+  }
+
+  async outboundStatus(): Promise<Record<string, unknown>> {
+    if (!this.#driver.outboundStatus) return { available: false, error: '当前驱动不提供出站配置' };
+    try {
+      const runtime = await this.#driver.outboundStatus();
+      const overrides = (runtime.overrides || {}) as Record<string, unknown>;
+      const expected = this.#config.outbound as Record<string, unknown>;
+      const synced = Object.keys(overrides).length === Object.keys(expected).length &&
+        Object.entries(expected).every(([key, value]) => overrides[key] === value);
+      return { available: true, ...runtime, synced };
+    }
+    catch (error) { return { available: false, error: error instanceof Error ? error.message : String(error) }; }
+  }
 
   constructor(options: OneBotServiceOptions) {
     this.#logger = options.logger;
@@ -66,6 +100,7 @@ export class OneBotService {
     this.#driver = options.driver;
     this.#stats = options.stats;
     this.#version = options.version;
+    this.media = new MediaAccess(options.config, options.driver, options.logger);
     this.registry = createActionRegistry(options.logger);
     this.messageIds = new MessageIdRegistry(
       options.config.onebot.messageIdMode,
@@ -118,6 +153,10 @@ export class OneBotService {
     await this.#manager.start();
     try {
       await this.#driver.start();
+      if (this.#driver.configureOutbound) {
+        try { await this.syncOutbound(); }
+        catch (error) { this.#logger.failure('onebot', '出站配置推送失败（下次桥接重连时重推）', error); }
+      }
     } catch (error) {
       this.#logger.failure('onebot', '驱动启动失败', error);
     }
@@ -149,6 +188,7 @@ export class OneBotService {
 
   /** Apply a config change (network hot reload, message id mode, heartbeat). */
   async applyConfig(change: { section: string; changedConnections: string[]; fullReload: boolean }): Promise<void> {
+    if (change.section === 'outbound') { await this.syncOutbound(); return; }
     if (change.section === 'network') {
       await this.#manager.apply(change as never);
       return;
@@ -291,6 +331,7 @@ export class OneBotService {
       selfId: () => this.#selfId,
       config: () => this.#config.onebot,
       messageIds: this.messageIds,
+      media: this.media,
     };
   }
 
@@ -301,6 +342,7 @@ export class OneBotService {
       logger: this.#logger,
       messageIds: this.messageIds,
       messages: this.messages,
+      media: this.media,
       stats: this.#stats,
       selfId: () => this.#selfId,
       online: () => this.#online,

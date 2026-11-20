@@ -1,9 +1,7 @@
 /** OneBot v11 wire types. Kept structural so unknown fields round-trip. */
 
-export interface Ob11Segment {
-  readonly type: string;
-  readonly data: Record<string, unknown>;
-}
+export type { Segment as Ob11Segment } from '../core/model.ts';
+import type { Segment as Ob11Segment } from '../core/model.ts';
 
 export type Ob11Message = string | Ob11Segment[];
 

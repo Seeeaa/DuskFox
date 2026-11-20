@@ -3,12 +3,14 @@ import type { MessageIdRegistry } from '../core/message-id.ts';
 import type { OnebotConfig } from '../core/config.ts';
 import { formatMessage, toCqString } from './segments.ts';
 import type { Ob11EventBase, Ob11Status } from './types.ts';
+import type { MediaAccess } from './media.ts';
 
 export interface EventContext {
   /** Numeric QQ id, 0 while the account is offline. */
   readonly selfId: () => number;
   readonly config: () => OnebotConfig;
   readonly messageIds: MessageIdRegistry;
+  readonly media?: MediaAccess;
 }
 
 function base(
@@ -37,7 +39,9 @@ export function buildMessageEvent(message: InboundMessage, ctx: EventContext): O
   const config = ctx.config();
   const format = config.messagePostFormat;
   const numericId = ctx.messageIds.register(message.messageId, message.scene, message.peer.id);
+  const sourceSender = (message.raw as { sender?: Record<string, unknown> } | undefined)?.sender;
   const sender = {
+    ...sourceSender,
     user_id: Number(message.sender.id) || 0,
     nickname: message.sender.name ?? '',
     ...(message.sender.card ? { card: message.sender.card } : {}),
@@ -45,12 +49,16 @@ export function buildMessageEvent(message: InboundMessage, ctx: EventContext): O
   };
   // 引用段的 id 来自桥接的原生 msgId；对外必须换成 OneBot 侧的数字 id，
   // 否则机器人拿到的 reply id 和 message_id 对不上，回引会失败。
-  const segments = message.segments.map((segment) =>
+  const segments = (ctx.media?.decorate(message.messageId, message.segments) || message.segments).map((segment) =>
     segment.type === 'reply'
-      ? { ...segment, id: String(ctx.messageIds.register(segment.id, message.scene, message.peer.id)) }
+      ? { ...segment, data: { ...segment.data, id: String(ctx.messageIds.register(String(segment.data.id ?? ''), message.scene, message.peer.id)) } }
       : segment,
   );
   const common = {
+    ...(message.raw && typeof message.raw === 'object' ? message.raw : {}),
+    self_id: ctx.selfId(),
+    post_type: message.self ? 'message_sent' : 'message',
+    time: messageTime(message),
     // 与 NapCat 对齐的字段：message_seq/real_id/real_seq/user_id 缺了不影响普通收发，
     // 但部分框架/插件会直接读它们，补上成本很低。
     message_id: numericId,

@@ -111,6 +111,7 @@ const NO_DOWNLOADS: DownloadCapabilities = {
 };
 
 /** 用一串段类型构造方向能力表。 */
+/** Local mock and v1/v2 adapter only. v3 bridge reports are consumed directly. */
 export function segmentCapabilities(kinds: readonly SegmentKind[] = []): SegmentCapabilities {
   const base: Record<SegmentKind, boolean> = { ...NO_SEGMENTS };
   for (const kind of kinds) base[kind] = true;
@@ -127,12 +128,14 @@ export function downloadCapabilities(kinds: readonly (keyof DownloadCapabilities
  * 兼容位由三个方向派生，避免出现"能收就算能发"的旧语义。
  * 任何修改 send/recv 之后都必须调用它。
  */
+/** Local construction only. Never applied to a v3 runtime report. */
 export function deriveLegacyCapabilities(caps: Capabilities): void {
   const target = caps as unknown as Record<string, unknown>;
   target.mediaImage = caps.send.image && caps.recv.image;
   target.mediaRecord = caps.send.record && caps.recv.record;
   target.mediaVideo = caps.send.video && caps.recv.video;
   target.mediaFile = caps.send.file && caps.recv.file;
+  target.mediaForward = caps.send.forward && caps.recv.forward;
   target.reply = caps.send.reply;
   target.at = caps.send.at && caps.recv.at;
   target.face = caps.send.face && caps.recv.face;
@@ -206,6 +209,8 @@ export interface MediaPayload {
 
 /** Contract every account backend implements. */
 export interface AccountDriver {
+  configureOutbound?(config: Record<string, unknown>): Promise<Record<string, unknown>>;
+  outboundStatus?(): Promise<Record<string, unknown>>;
   readonly id: string;
   readonly name: string;
   /** One sentence shown in the console. */
@@ -228,12 +233,12 @@ export interface AccountDriver {
 
   sendMessage(message: OutboundMessage): Promise<SendResult>;
   /** Look a message up by its native id (used by `get_msg` when the window missed it). */
-  fetchMessage?(nativeId: string): Promise<InboundMessage | null>;
+  fetchMessage?(nativeId: string, peer?: { scene: 'private' | 'group'; peerId: string }): Promise<InboundMessage | null>;
   /**
    * Download the media attached to a message as base64 (used by `get_record`).
    * Returns null when the runtime has no bytes for that message.
    */
-  fetchMedia?(nativeId: string, kind: 'image' | 'record' | 'file' | 'video'): Promise<MediaPayload | null>;
+  fetchMedia?(nativeId: string, kind: 'image' | 'record' | 'file' | 'video', selector?: string): Promise<MediaPayload | null>;
   /** Expand a merged-forward message by its native id (OneBot get_forward_msg). */
   fetchForward?(nativeId: string): Promise<unknown[] | null>;
   recall(messageId: string): Promise<void>;

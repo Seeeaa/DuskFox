@@ -1,128 +1,19 @@
-/** Protocol independent message model used between drivers and OneBot. */
-
+/** Shared message segments use the bridge/OneBot wire shape end to end. */
 export type Scene = 'private' | 'group';
 
-export interface TextSegment {
-  readonly type: 'text';
-  readonly text: string;
+/** Unknown segment kinds and extension fields pass through unchanged. */
+export interface Segment {
+  readonly type: string;
+  readonly data: Record<string, unknown>;
+  readonly [key: string]: unknown;
 }
 
-export interface ImageSegment {
-  readonly type: 'image';
-  /** File path, URL or base64 payload as accepted by the driver. */
-  readonly file: string;
-  readonly url?: string;
-  readonly summary?: string;
-}
-
-export interface FaceSegment {
-  readonly type: 'face';
-  readonly id: string;
-  readonly text?: string;
-}
-
-export interface AtSegment {
-  readonly type: 'at';
-  /** `all` or a user id. */
-  readonly target: string;
-  readonly name?: string;
-}
-
-export interface ReplySegment {
-  readonly type: 'reply';
-  readonly id: string;
-}
-
-export interface RecordSegment {
-  readonly type: 'record';
-  /** File name or runtime-side handle; not always a usable path. */
-  readonly file: string;
-  readonly url?: string;
-  /**
-   * Local path resolved by the runtime (QQ container), when it knows one.
-   * AstrBot and other bots fall back to this when `file` is only a name, so it
-   * is reported as a NapCat-style extension key, not as a Fox path.
-   */
-  readonly path?: string;
-  /** Byte size as reported by the client (string on the wire). */
-  readonly size?: number;
-}
-
-export interface VideoSegment {
-  readonly type: 'video';
-  readonly file: string;
-  readonly url?: string;
-  /** 文件名、字节数、时长（秒）都来自原生元素，拿不到就不写，不编造。 */
-  readonly name?: string;
-  readonly size?: number;
-  readonly duration?: number;
-  /** 本地路径（属于运行时所在环境，跨容器时不可直读）。 */
-  readonly path?: string;
-}
-
-export interface FileSegment {
-  readonly type: 'file';
-  readonly file: string;
-  readonly name?: string;
-  readonly size?: number;
-  readonly url?: string;
-  /** 本地路径（属于运行时所在环境，跨容器时不可直读）。 */
-  readonly path?: string;
-}
-
-/** 合并转发里的一个节点；消息体用内部段表示，发送时再转成 OneBot 形状。 */
 export interface ForwardNode {
-  /** 发送者 QQ 号（拿不到就是空串）。 */
   readonly userId: string;
   readonly nickname?: string;
-  /** Epoch seconds. */
   readonly time: number;
   readonly segments: readonly Segment[];
 }
-
-export interface ForwardSegment {
-  readonly type: 'forward';
-  /** 原生侧的合并转发 id（res_id / msgId），用它去展开节点。 */
-  readonly id: string;
-  /** 已展开的节点；为空表示只有 id，需要 get_forward_msg 再查。 */
-  readonly content?: readonly ForwardNode[];
-}
-
-export interface JsonSegment {
-  readonly type: 'json';
-  readonly data: string;
-}
-
-export interface MarkdownSegment {
-  readonly type: 'markdown';
-  readonly content: string;
-}
-
-export interface ForwardSegment {
-  readonly type: 'forward';
-  /** Node id of the forwarded message. */
-  readonly id: string;
-}
-
-export interface UnknownSegment {
-  readonly type: 'unknown';
-  readonly kind: string;
-  readonly raw?: unknown;
-}
-
-export type Segment =
-  | TextSegment
-  | ImageSegment
-  | FaceSegment
-  | AtSegment
-  | ReplySegment
-  | RecordSegment
-  | VideoSegment
-  | FileSegment
-  | JsonSegment
-  | MarkdownSegment
-  | ForwardSegment
-  | UnknownSegment;
 
 export interface Peer {
   readonly id: string;

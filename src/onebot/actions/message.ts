@@ -4,6 +4,7 @@ import { GroupIdSchema, MessageIdSchema, MessageSchema, UserIdSchema } from './r
 import { ActionError, RETCODE } from '../types.ts';
 import { formatMessage, parseMessage, toCqString } from '../segments.ts';
 import type { OutboundMessage, Scene, Segment } from '../../core/model.ts';
+import { mediaReference, parseMediaReference, type MediaKind } from '../media.ts';
 
 interface MessageShape {
   readonly ob11Id: number;
@@ -21,7 +22,11 @@ interface MessageShape {
 }
 
 /** The exact payload `get_msg` returns, whether from the window or the runtime. */
-function shapeMessage(input: MessageShape): Record<string, unknown> {
+function shapeMessage(input: MessageShape, context?: ActionContext): Record<string, unknown> {
+  const readable = context?.media?.decorate(input.nativeId, input.segments) || input.segments;
+  const segments = context ? readable.map(segment => segment.type === 'reply'
+    ? { ...segment, data: { ...segment.data, id: String(context.messageIds.register(String(segment.data.id || ''), input.scene, input.peerId)) } }
+    : segment) : readable;
   return {
     // NapCat 的 get_msg 返回的是完整 message 事件形状，框架会直接把它当事件消费，
     // 只给 8 个字段会让读 post_type/self_id/sub_type 的插件拿不到值。
@@ -46,8 +51,8 @@ function shapeMessage(input: MessageShape): Record<string, unknown> {
     font: 14,
     // 与 message 的实际序列化格式保持一致。
     message_format: input.format,
-    message: formatMessage(input.segments, input.format),
-    raw_message: toCqString(input.segments),
+    message: formatMessage(segments, input.format),
+    raw_message: toCqString(segments),
   };
 }
 
@@ -61,14 +66,16 @@ interface SendParams {
 
 function segmentsFrom(params: SendParams): Segment[] {
   if (params.auto_escape && typeof params.message === 'string') {
-    return [{ type: 'text', text: params.message }];
+    return [{ type: 'text', data: { text: params.message } }];
   }
-  return parseMessage(params.message as never);
+  const parsed = parseMessage(params.message as never);
+  return parsed.length && parsed.every(segment => segment.type === 'node')
+    ? [{ type: 'forward', data: { content: parsed } }] : parsed;
 }
 
 function replyTarget(segments: readonly Segment[]): string | undefined {
   for (const segment of segments) {
-    if (segment.type === 'reply') return segment.id;
+    if (segment.type === 'reply') return String(segment.data.id ?? '');
   }
   return undefined;
 }
@@ -76,9 +83,30 @@ function replyTarget(segments: readonly Segment[]): string | undefined {
 /** 引用段的 id 由机器人按 OneBot 数字 id 传回；驱动层要的是原生 msgId。 */
 function withNativeReplyIds(segments: readonly Segment[], context: ActionContext): Segment[] {
   return segments.map((segment) => {
+    if (segment.type === 'forward') {
+      const content = segment.data.content ?? segment.data.messages;
+      return Array.isArray(content) ? { ...segment, data: {
+        ...segment.data, content: withNativeReplyIds(content as Segment[], context),
+      } } : segment;
+    }
+    if (segment.type === 'node') {
+      const data = { ...segment.data };
+      const id = data.id ?? data.message_id;
+      if (id !== undefined) {
+        const value = String(id);
+        const resolved = /^\d{1,10}$/.test(value) ? context.messageIds.resolve(Number(value)) : null;
+        if (resolved) {
+          data.id = context.messages.get(Number(value))?.nativeId || resolved.nativeId;
+          data.source_peer = { chatType: resolved.scene === 'group' ? 2 : 1, peerUid: resolved.peerId, guildId: '' };
+        } else data.id = value;
+      } else if (data.content !== undefined) {
+        data.content = withNativeReplyIds(parseMessage(data.content as never), context);
+      }
+      return { ...segment, data };
+    }
     if (segment.type !== 'reply') return segment;
-    const nativeId = context.messageIds.nativeIdOf(Number(segment.id));
-    return nativeId ? { ...segment, id: nativeId } : segment;
+    const nativeId = context.messages.get(Number(segment.data.id))?.nativeId || context.messageIds.nativeIdOf(Number(segment.data.id));
+    return nativeId ? { ...segment, data: { ...segment.data, id: nativeId } } : segment;
   });
 }
 
@@ -155,75 +183,143 @@ function checkSegments(segments: readonly Segment[], scene: Scene, context: Acti
   };
   for (const segment of segments) {
     if (segment.type === 'text' || segment.type === 'reply') continue;
-    // 未知段必须在动作层就拒绝成 1200，不能指望驱动逐个内核去报（审查报告 H）。
-    if (segment.type === 'unknown') {
-      return new ActionError(`不支持的消息段类型：${segment.kind}`, RETCODE.unsupported);
-    }
-    if (!send[segment.type]) {
+    if (!send[segment.type as keyof typeof send]) {
       return new ActionError(`当前驱动不支持发送${labels[segment.type] ?? segment.type}消息段`, RETCODE.unsupported);
     }
   }
   return null;
 }
 
-/**
- * 取回媒体字节的动作：get_image / get_record / get_file / get_video 共用一套定位与错误语义。
- * 下载是独立方向：媒体类型没在 download 里声明就直接 1200，不假装能给。
- */
-function mediaDownloadActions(
-  name: string,
-  kind: 'image' | 'record' | 'file' | 'video',
-  label: string,
-): Array<ActionDefinition<any, any>> {
-  return [
-    {
-      name,
-      description: `取${label}消息的字节数据（base64）`,
-      requires: ['mediaDownload'],
-      params: Type.Object({
-        message_id: Type.Optional(MessageIdSchema),
-        // OneBot 规范用消息段的 file 定位；我们只能在自己的最近窗口里反查。
-        file: Type.Optional(Type.String()),
-      }),
-      async handle(params: { message_id?: number; file?: string }, context: ActionContext) {
-        if (!context.driver.capabilities.download[kind]) {
-          throw new ActionError(`运行时没有声明可下载${label}`, RETCODE.unsupported);
-        }
-        let nativeId = '';
-        if (params.message_id !== undefined) {
-          nativeId = context.messageIds.resolve(params.message_id)?.nativeId ?? '';
-        }
-        const wanted = String(params.file ?? '');
-        if (!nativeId && wanted) {
-          const hit = context.messages
-            .recent(500)
-            .find((item) => item.segments.some((segment) => segment.type === kind && segment.file === wanted));
-          nativeId = hit?.nativeId ?? '';
-        }
-        if (!nativeId) {
-          throw new ActionError(`需要 message_id，或一个仍在保留窗口内的${label} file`, RETCODE.notFound);
-        }
-        if (!context.driver.fetchMedia) throw new ActionError('当前驱动不支持媒体下载', RETCODE.unsupported);
-        try {
-          const media = await context.driver.fetchMedia(nativeId, kind);
-          if (!media) {
-            throw new ActionError(`运行时取不到该${label}：消息可能在本地窗口之外`, RETCODE.notFound);
-          }
-          return { file: 'base64://' + media.base64, file_name: media.name, file_size: media.size };
-        } catch (error) {
-          // 字节还没落盘是可重试状态，用专用 retcode 和"消息不存在"区分开。
-          const detail = error instanceof Error ? error.message : String(error);
-          if (detail.includes('MEDIA_NOT_READY')) {
-            throw new ActionError(`运行时还没有把该${label}落到本地，请稍后重试（跨容器时只能用本动作取字节）`, RETCODE.mediaNotReady);
-          }
-          throw error;
-        }
-      },
+interface MediaParams {
+  readonly message_id?: number;
+  readonly file?: string;
+  readonly file_id?: string;
+}
+
+function locateMedia(params: MediaParams, kind: MediaKind, context: ActionContext): string {
+  const wanted = String(params.file_id || params.file || '');
+  if (!wanted && params.message_id === undefined) throw new ActionError('需要 message_id、file 或 file_id', RETCODE.badParam);
+  const explicit = context.media?.locate(wanted) || parseMediaReference(wanted);
+  if (explicit) {
+    if (explicit.kind !== kind) throw new ActionError('媒体标识类型不匹配', RETCODE.badParam);
+    return mediaReference(explicit.nativeId, kind, explicit.selector);
+  }
+  let nativeId = params.message_id === undefined ? '' : context.messageIds.resolve(params.message_id)?.nativeId || '';
+  let selector = '';
+  const records = context.messages.recent(500);
+  const hit = records.find(item => (!nativeId || item.nativeId === nativeId) &&
+    item.segments.some(segment => segment.type === kind && (!wanted ||
+      [segment.data.file_id, segment.data.file, segment.data.url, segment.data.name].some(value => String(value || '') === wanted))));
+  if (hit) {
+    const segment = hit.segments.find(segment => segment.type === kind && (!wanted ||
+      [segment.data.file_id, segment.data.file, segment.data.url, segment.data.name].some(value => String(value || '') === wanted)));
+    const ref = parseMediaReference(String(segment?.data.file_id || ''));
+    nativeId = hit.nativeId;
+    selector = ref?.selector || '';
+  }
+  if (!nativeId) throw new ActionError('需要有效的 message_id、file 或 file_id', RETCODE.notFound);
+  return mediaReference(nativeId, kind, selector);
+}
+
+function mediaDownloadActions(name: string, kind: MediaKind, label: string): Array<ActionDefinition<any, any>> {
+  return [{
+    name,
+    description: '取得' + label + '的下载地址和实际字节',
+    requires: ['mediaDownload'],
+    params: Type.Object({
+      message_id: Type.Optional(MessageIdSchema),
+      file: Type.Optional(Type.String()),
+      file_id: Type.Optional(Type.String()),
+    }),
+    async handle(params: MediaParams, context: ActionContext) {
+      if (!context.driver.capabilities.download[kind]) {
+        throw new ActionError('运行时没有声明可下载' + label, RETCODE.unsupported);
+      }
+      const reference = locateMedia(params, kind, context);
+      const ref = parseMediaReference(reference)!;
+      if (!context.driver.fetchMedia) throw new ActionError('当前驱动不支持媒体下载', RETCODE.unsupported);
+      try {
+        const media = context.media
+          ? await context.media.read(ref)
+          : await context.driver.fetchMedia(ref.nativeId, kind, ref.selector);
+        if (!media) throw new ActionError('运行时取不到该' + label, RETCODE.notFound);
+        const url = context.media?.url(reference, media.name) || '';
+        return {
+          file: url || 'base64://' + media.base64,
+          url,
+          file_id: reference,
+          file_name: media.name,
+          name: media.name,
+          file_size: media.size,
+          size: media.size,
+          base64: media.base64,
+        };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (detail.includes('MEDIA_NOT_READY')) throw new ActionError(detail, RETCODE.mediaNotReady);
+        throw error;
+      }
     },
-  ];
+  }];
+}
+
+/** AstrBot calls these when a file segment has no direct HTTP URL. */
+function fileUrlAction(name: string): ActionDefinition<any, any> {
+  return {
+    name,
+    description: '取得文件的 HTTP 下载地址',
+    params: Type.Object({
+      file_id: Type.String(),
+      group_id: Type.Optional(GroupIdSchema),
+      user_id: Type.Optional(UserIdSchema),
+      busid: Type.Optional(Type.Number()),
+    }),
+    async handle(params: { file_id: string }, context: ActionContext) {
+      const reference = locateMedia(params, 'file', context);
+      if (!context.media) return context.call('get_file', { file_id: reference });
+      const record = context.messages.recent(500).flatMap(item => item.segments)
+        .find(segment => segment.type === 'file' && String(segment.data.file_id || '') === reference);
+      const name = String(record?.data.file_name || record?.data.name || record?.data.file || '');
+      return { url: context.media.url(reference, name || 'file'), file_id: reference, file_name: name, name };
+    },
+  };
+}
+
+function forwardSendAction(name: string, scene: Scene): ActionDefinition<any, any> {
+  return {
+    name, description: '发送合并转发（已有消息或自定义 text/image 节点）',
+    params: Type.Object({
+      ...(scene === 'group' ? { group_id: GroupIdSchema } : { user_id: UserIdSchema }),
+      messages: Type.Array(Type.Unknown(), { minItems: 1 }),
+    }),
+    async handle(params: { group_id?: number; user_id?: number; messages: unknown[] }, context: ActionContext) {
+      return send(scene, Number(scene === 'group' ? params.group_id : params.user_id), {
+        message: [{ type: 'forward', data: { content: params.messages } }],
+      }, context);
+    },
+  };
+}
+
+function uploadFileAction(name: string, scene: Scene): ActionDefinition<any, any> {
+  return {
+    name, description: '通过现有 RichMedia 发送文件',
+    params: Type.Object({
+      ...(scene === 'group' ? { group_id: GroupIdSchema } : { user_id: UserIdSchema }),
+      file: Type.String(), name: Type.Optional(Type.String()),
+    }),
+    async handle(params: { group_id?: number; user_id?: number; file: string; name?: string }, context: ActionContext) {
+      return send(scene, Number(scene === 'group' ? params.group_id : params.user_id), {
+        message: [{ type: 'file', data: { file: params.file, name: params.name || '' } }],
+      }, context);
+    },
+  };
 }
 
 export const messageActions: Array<ActionDefinition<any, any>> = [
+  forwardSendAction('send_group_forward_msg', 'group'),
+  forwardSendAction('send_private_forward_msg', 'private'),
+  uploadFileAction('upload_group_file', 'group'),
+  uploadFileAction('upload_private_file', 'private'),
   {
     name: 'send_private_msg',
     description: '发送私聊消息',
@@ -291,16 +387,24 @@ export const messageActions: Array<ActionDefinition<any, any>> = [
           time: record.time,
           segments: record.segments,
           format: context.config.messagePostFormat,
-        });
+        }, context);
       }
 
       // The message fell out of the local window; ask the runtime (contract v2)
       // before admitting we cannot answer. Legacy runtimes return null here.
-      const nativeId = context.messageIds.nativeIdOf(params.message_id);
+      const resolved = context.messageIds.resolve(params.message_id);
+      const nativeId = resolved?.nativeId;
       if (nativeId && context.driver.fetchMessage) {
-        const fetched = await context.driver.fetchMessage(nativeId);
+        const fetched = await context.driver.fetchMessage(nativeId, resolved ? { scene: resolved.scene, peerId: resolved.peerId } : undefined);
         if (fetched) {
-          const ob11Id = context.messageIds.register(fetched.messageId, fetched.scene, fetched.peer.id);
+          const ob11Id = params.message_id;
+          context.messages.save({
+            nativeId: fetched.messageId, ob11Id,
+            scene: fetched.scene, peerId: fetched.peer.id,
+            senderId: fetched.sender.id, senderName: fetched.sender.name,
+            senderCard: fetched.sender.card, senderRole: fetched.sender.role,
+            time: fetched.time, self: fetched.self, segments: fetched.segments,
+          });
           return shapeMessage({
             ob11Id,
             nativeId: fetched.messageId,
@@ -314,28 +418,30 @@ export const messageActions: Array<ActionDefinition<any, any>> = [
             time: fetched.time,
             segments: fetched.segments,
             format: context.config.messagePostFormat,
-          });
+          }, context);
         }
       }
-      throw new ActionError('消息不存在：本地窗口（最近 500 条）已淘汰，且运行时无法按该 ID 查询', RETCODE.notFound);
+      throw new ActionError('消息未找到：缓存未命中，原生消息与引用回查均未取得内容', RETCODE.notFound);
     },
   },
   ...mediaDownloadActions('get_image', 'image', '图片'),
   ...mediaDownloadActions('get_record', 'record', '语音'),
   ...mediaDownloadActions('get_file', 'file', '文件'),
   ...mediaDownloadActions('get_video', 'video', '视频'),
+  fileUrlAction('get_group_file_url'),
+  fileUrlAction('get_private_file_url'),
   {
     name: 'get_forward_msg',
     description: '按消息 ID 展开合并转发节点',
     params: Type.Object({
-      message_id: Type.Optional(MessageIdSchema),
-      // 也允许直接用合并转发段的 id（部分框架就是这么调的）。
+      message_id: Type.Optional(Type.Union([Type.String(), MessageIdSchema])),
+      // AstrBot may pass a resId as message_id rather than id.
       id: Type.Optional(Type.String()),
     }),
-    async handle(params: { message_id?: number; id?: string }, context: ActionContext) {
+    async handle(params: { message_id?: number | string; id?: string }, context: ActionContext) {
       let nativeId = String(params.id ?? '');
       if (!nativeId && params.message_id !== undefined) {
-        nativeId = context.messageIds.resolve(params.message_id)?.nativeId ?? '';
+        nativeId = context.messageIds.resolve(Number(params.message_id))?.nativeId || String(params.message_id);
       }
       if (!nativeId) throw new ActionError('需要 message_id 或合并转发段的 id', RETCODE.notFound);
       if (!context.driver.fetchForward) {
@@ -350,7 +456,22 @@ export const messageActions: Array<ActionDefinition<any, any>> = [
       return {
         messages: nodes.map((node) => {
           const item = (node ?? {}) as Record<string, unknown>;
-          return { ...item, user_id: Number(item.user_id ?? 0) || 0 };
+          const data = item.type === 'node' && item.data && typeof item.data === 'object'
+            ? item.data as Record<string, unknown> : item;
+          const sender = (data.sender || {}) as Record<string, unknown>;
+          const userId = Number(data.user_id || sender.user_id || data.uin || 0);
+          const nickname = String(data.nickname || sender.nickname || data.name || '');
+          const source = data.message ?? data.content ?? [];
+          const parsed = Array.isArray(source) && source.length === 0 ? [] : parseMessage(source as never);
+          const segments = context.media?.decorate(String(data.message_id || data.msgId || nativeId), parsed) || parsed;
+          return {
+            ...data,
+            user_id: userId,
+            nickname,
+            sender: { ...sender, user_id: userId, nickname },
+            message: segments,
+            content: segments,
+          };
         }),
       };
     },

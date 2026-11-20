@@ -25,10 +25,14 @@ $appDir = Join-Path $Target "resources\app"
 $pkgPath = Join-Path $appDir "package.json"
 Copy-Item $pkgPath "$pkgPath.original" -Force
 
-foreach ($file in @("entry.cjs", "server.mjs", "native-kernel.cjs", "sim-kernel.mjs")) {
+foreach ($file in @("entry.cjs", "server.mjs", "native-kernel.cjs", "sim-kernel.mjs", "event-stream.mjs", "capabilities.mjs", "login-pump.mjs")) {
   $from = Join-Path $BridgeRoot $file
   if (-not (Test-Path $from)) { throw "缺少运行时文件：$from" }
   Copy-Item $from (Join-Path $appDir $file) -Force
+}
+
+foreach ($directory in @("kernel", "routes")) {
+  Copy-Item -LiteralPath (Join-Path $BridgeRoot $directory) -Destination $appDir -Recurse -Force
 }
 
 $pkg = Get-Content $pkgPath -Raw | ConvertFrom-Json

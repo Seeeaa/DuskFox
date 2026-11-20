@@ -45,10 +45,12 @@ export function registerConfigRoutes(router: Router, context: WebuiContext): voi
       },
       onebot: snapshot.onebot,
       network: snapshot.network,
+      outbound: snapshot.outbound,
       files: {
         webui: context.config.fileOf('webui'),
         onebot: context.config.fileOf('onebot'),
         network: context.config.fileOf('network'),
+        outbound: context.config.fileOf('outbound'),
       },
     });
   });
@@ -67,7 +69,11 @@ export function registerConfigRoutes(router: Router, context: WebuiContext): voi
         const change = context.config.saveNetwork(payload.network);
         changes.push(`network（${change.changedConnections.length} 项变化）`);
       }
-      if (changes.length === 0) throw new HttpError(400, '请求中没有 onebot 或 network 字段');
+      if (payload.outbound !== undefined) {
+        context.config.saveOutbound(payload.outbound);
+        changes.push('outbound');
+      }
+      if (changes.length === 0) throw new HttpError(400, '请求中没有 onebot、network 或 outbound 字段');
     } catch (error) {
       asHttpError(error);
     }
@@ -84,6 +90,7 @@ export function registerConfigRoutes(router: Router, context: WebuiContext): voi
       version: context.version,
       onebot: snapshot.onebot,
       network: snapshot.network,
+      outbound: snapshot.outbound,
       webui: {
         host: snapshot.webui.host,
         port: snapshot.webui.port,
@@ -109,8 +116,8 @@ export function registerConfigRoutes(router: Router, context: WebuiContext): voi
 
   router.post('/api/config/reset', async ({ res, url }) => {
     const target = url.searchParams.get('to') ?? 'all';
-    if (target !== 'all' && target !== 'onebot' && target !== 'network') {
-      throw new HttpError(400, 'to 只能是 all / onebot / network');
+    if (target !== 'all' && target !== 'onebot' && target !== 'network' && target !== 'outbound') {
+      throw new HttpError(400, 'to 只能是 all / onebot / network / outbound');
     }
     const changes = context.config.reset(target);
     sendJson(res, 200, { ok: true, sections: changes.map((change) => change.section) });

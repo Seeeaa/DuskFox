@@ -55,10 +55,10 @@ async function waitEvents(runtime: Runtime, count: number): Promise<Array<Record
 function nativeProbe(session: Record<string, unknown> = {}): { kernel: NativeKernel; emitted: Array<Record<string, any>> } {
   const emitted: Array<Record<string, any>> = [];
   const kernel = new NativeKernel();
-  kernel.emit = (event: unknown) => {
+  kernel.state.emit = (event: unknown) => {
     emitted.push(event as Record<string, any>);
   };
-  kernel.session = session;
+  kernel.state.session = session;
   return { kernel, emitted };
 }
 

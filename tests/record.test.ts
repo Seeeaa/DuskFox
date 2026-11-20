@@ -123,7 +123,7 @@ test('语音：原生 pttElement 归一化成 OneBot record 段', () => {
 
 test('语音：CQ 字符串与消息段数组都能往返', () => {
   const segments = parseCqString('[CQ:record,file=a.amr,url=https://x/a.amr]');
-  assert.deepEqual(segments, [{ type: 'record', file: 'a.amr', url: 'https://x/a.amr' }]);
+  assert.deepEqual(segments, [{ type: 'record', data: { file: 'a.amr', url: 'https://x/a.amr' } }]);
   assert.equal(toCqString(segments), '[CQ:record,file=a.amr,url=https://x/a.amr]');
   assert.deepEqual(formatMessage(segments, 'array'), [
     { type: 'record', data: { file: 'a.amr', url: 'https://x/a.amr' } },

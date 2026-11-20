@@ -4,9 +4,38 @@ import type { WebuiContext } from '../context.ts';
 import { extractToken, isAdminToken, TICKET_ROUTES } from '../auth.ts';
 import { LoginGuard } from '../auth.ts';
 import { loginFrame } from '../official-view.ts';
+import { ConfigError } from '../../core/config.ts';
 
 /** Auth, status, process control, storage and security routes. */
 export function registerSystemRoutes(router: Router, context: WebuiContext, guard: LoginGuard): void {
+  router.get('/api/outbound/config', async ({ res }) => {
+    sendJson(res, 200, { ok: true, config: context.config.outbound, runtime: await context.service.outboundStatus() });
+  });
+  router.put('/api/outbound/config', async ({ res, body }) => {
+    try {
+      const payload = await body();
+      const next = context.config.prepareOutbound(payload);
+      // Validate against the bridge's actual environment before persisting when it is online.
+      if (context.driver.configureOutbound) {
+        try { await context.driver.configureOutbound(next); }
+        catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          if (detail.includes('HTTP 400')) throw new HttpError(400, detail);
+        }
+      }
+      context.config.saveOutbound(payload);
+    } catch (error) {
+      if (error instanceof ConfigError) throw new HttpError(400, error.message);
+      throw error;
+    }
+    let synced = false, error = '';
+    try { await context.service.syncOutbound(); synced = true; }
+    catch (reason) { error = reason instanceof Error ? reason.message : String(reason); }
+    sendJson(res, 200, {
+      ok: true, saved: true, synced, error, config: context.config.outbound,
+      file: context.config.fileOf('outbound'), runtime: await context.service.outboundStatus(),
+    });
+  });
   router.post('/api/auth/login', async ({ req, res, body }) => {
     const address = req.socket.remoteAddress ?? 'unknown';
     guard.check(address);
@@ -56,7 +85,7 @@ export function registerSystemRoutes(router: Router, context: WebuiContext, guar
       try { officialAccount = await loginFrame('account'); }
       catch (error) { officialLoginError = error instanceof Error ? error.message : String(error); }
     }
-    sendJson(res, 200, { ...status, officialLogin, officialAccount, officialLoginError });
+    sendJson(res, 200, { ...status, officialLogin, officialAccount, officialLoginError, outbound: await context.service.outboundStatus() });
   });
 
   /** Action table for the console debug page, including what the driver supports. */

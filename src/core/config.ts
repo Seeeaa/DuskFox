@@ -25,6 +25,25 @@ export const WebuiConfigSchema = Type.Object({
 });
 export type WebuiConfig = Static<typeof WebuiConfigSchema>;
 
+/** Omitted fields inherit the bridge environment/default; explicit values override it. */
+export const OutboundConfigSchema = Type.Object({
+  enabled: Type.Optional(Type.Boolean()),
+  minMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 60000 })),
+  maxMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 60000 })),
+  quietHoursEnabled: Type.Optional(Type.Boolean()),
+  quietStart: Type.Optional(Type.String({ pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' })),
+  quietEnd: Type.Optional(Type.String({ pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' })),
+  idleProbability: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+  idleDurationMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 86400000 })),
+  timeZone: Type.Optional(Type.String({ minLength: 1 })),
+  fileMaxBytes: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
+  stagingCleanupEnabled: Type.Optional(Type.Boolean()),
+  stagingCleanupDays: Type.Optional(Type.Integer({ minimum: 1, maximum: 3650 })),
+  stagingCleanupIntervalMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 2147483647 })),
+  stagingCleanupStartupDelayMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 2147483647 })),
+});
+export type OutboundConfig = Static<typeof OutboundConfigSchema>;
+
 export const OnebotConfigSchema = Type.Object({
   /** `array` sends message segments, `string` sends CQ code strings. */
   messagePostFormat: Type.Union([Type.Literal('array'), Type.Literal('string')], { default: 'array' }),
@@ -122,7 +141,7 @@ export const IMPLEMENTED_KINDS: ReadonlySet<NetworkKind> = new Set<NetworkKind>(
   'sse',
 ]);
 
-export type ConfigSection = 'webui' | 'onebot' | 'network';
+export type ConfigSection = 'webui' | 'onebot' | 'network' | 'outbound';
 
 export interface ConfigChange {
   readonly section: ConfigSection;
@@ -206,6 +225,7 @@ const SECTION_FILES: Record<ConfigSection, string> = {
   webui: 'webui.json',
   onebot: 'onebot.json',
   network: 'network.json',
+  outbound: 'outbound.json',
 };
 
 /**
@@ -222,6 +242,7 @@ export class ConfigStore {
   #webui!: WebuiConfig;
   #onebot!: OnebotConfig;
   #network!: NetworkConfig;
+  #outbound: OutboundConfig = {};
 
   constructor(paths: RuntimePaths, logger: Logger) {
     this.#paths = paths;
@@ -240,6 +261,33 @@ export class ConfigStore {
     return this.#network;
   }
 
+  get outbound(): OutboundConfig { return this.#outbound; }
+
+  prepareOutbound(raw: unknown): OutboundConfig {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new ConfigError('outbound 必须是对象');
+    const merged = { ...this.#outbound } as Record<string, unknown>;
+    for (const [key, value] of Object.entries(raw)) {
+      if (!Object.hasOwn(OutboundConfigSchema.properties, key)) throw new ConfigError('未知出站配置字段：' + key);
+      if (value === null) delete merged[key]; else merged[key] = value;
+    }
+    const next = normalise(OutboundConfigSchema, merged);
+    if (next.minMs !== undefined && next.maxMs !== undefined && next.minMs > next.maxMs) throw new ConfigError('minMs 不能超过 maxMs');
+    if (next.timeZone) {
+      try { new Intl.DateTimeFormat('en', { timeZone: next.timeZone }).format(); }
+      catch { throw new ConfigError('timeZone 必须是有效的 IANA 时区'); }
+    }
+    return next;
+  }
+
+  saveOutbound(raw: unknown): ConfigChange {
+    const next = this.prepareOutbound(raw);
+    writeJsonAtomic(this.fileOf('outbound'), next);
+    this.#outbound = next;
+    const change: ConfigChange = { section: 'outbound', changedConnections: [], fullReload: false };
+    this.#announce(change);
+    return change;
+  }
+
   fileOf(section: ConfigSection): string {
     return path.join(this.#paths.config, SECTION_FILES[section]);
   }
@@ -254,6 +302,7 @@ export class ConfigStore {
     this.#webui = this.#loadSection('webui', WebuiConfigSchema);
     this.#onebot = this.#loadSection('onebot', OnebotConfigSchema);
     this.#network = this.#loadSection('network', NetworkConfigSchema);
+    this.#outbound = this.#loadSection('outbound', OutboundConfigSchema);
 
     let dirty = false;
     if (!this.#webui.token) {
@@ -279,6 +328,8 @@ export class ConfigStore {
         this.#webui = next;
       } else if (section === 'onebot') {
         this.#onebot = this.#loadSection('onebot', OnebotConfigSchema);
+      } else if (section === 'outbound') {
+        this.#outbound = this.#loadSection('outbound', OutboundConfigSchema);
       } else {
         this.#network = this.#loadSection('network', NetworkConfigSchema);
       }
@@ -357,15 +408,17 @@ export class ConfigStore {
     const file = this.fileOf(section);
     if (section === 'webui') writeJsonAtomic(file, this.#webui);
     else if (section === 'onebot') writeJsonAtomic(file, this.#onebot);
+    else if (section === 'outbound') writeJsonAtomic(file, this.#outbound);
     else writeJsonAtomic(file, this.#network);
   }
 
   /** Snapshot for the export endpoint. Tokens are redacted by the caller. */
-  snapshot(): { webui: WebuiConfig; onebot: OnebotConfig; network: NetworkConfig } {
+  snapshot(): { webui: WebuiConfig; onebot: OnebotConfig; network: NetworkConfig; outbound: OutboundConfig } {
     return {
       webui: structuredClone(this.#webui),
       onebot: structuredClone(this.#onebot),
       network: structuredClone(this.#network),
+      outbound: structuredClone(this.#outbound),
     };
   }
 
@@ -379,6 +432,7 @@ export class ConfigStore {
   importAll(data: unknown): ConfigChange[] {
     if (typeof data !== 'object' || data === null) throw new ConfigError('导入内容必须是对象');
     const record = data as Record<string, unknown>;
+    const nextOutbound = record.outbound !== undefined ? this.prepareOutbound(record.outbound) : this.#outbound;
 
     const nextOnebot = record.onebot !== undefined ? normalise(OnebotConfigSchema, record.onebot) : this.#onebot;
     const nextNetwork = record.network !== undefined ? normalise(NetworkConfigSchema, record.network) : this.#network;
@@ -396,19 +450,26 @@ export class ConfigStore {
     if (record.onebot !== undefined) write('onebot', nextOnebot);
     if (record.network !== undefined) write('network', nextNetwork);
     if (record.webui !== undefined) write('webui', nextWebui);
+    if (record.outbound !== undefined) write('outbound', nextOutbound);
 
     // Only now is the in-memory state allowed to move.
     if (record.onebot !== undefined) this.#onebot = nextOnebot;
     if (record.network !== undefined) this.#network = nextNetwork;
     if (record.webui !== undefined) this.#webui = nextWebui;
+    if (record.outbound !== undefined) this.#outbound = nextOutbound;
     for (const change of changes) this.#announce(change);
     this.#logger.info('config', `配置已导入：${changes.map((change) => change.section).join(', ') || '无变化'}`);
     return changes;
   }
 
   /** Restore the OneBot and network sections to built-in defaults. */
-  reset(to: 'onebot' | 'network' | 'all' = 'all'): ConfigChange[] {
+  reset(to: 'onebot' | 'network' | 'outbound' | 'all' = 'all'): ConfigChange[] {
     const changes: ConfigChange[] = [];
+    if (to === 'outbound' || to === 'all') {
+      this.#outbound = {};
+      this.save('outbound');
+      changes.push({ section: 'outbound', changedConnections: [], fullReload: false });
+    }
     if (to === 'onebot' || to === 'all') {
       this.#onebot = normalise(OnebotConfigSchema, {});
       this.save('onebot');

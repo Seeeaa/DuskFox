@@ -5,7 +5,7 @@ ARG QQ_SHA256=d085dd89397225061eb9f194308f688129818ed445777e97a4a0a16e13d7b0e8
 
 RUN --mount=type=bind,source=deploy/linux,target=/qq-package,ro \
     apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl xvfb fluxbox dbus-x11 fonts-noto-cjk procps \
+    ca-certificates curl xvfb fluxbox dbus-x11 fonts-noto-cjk procps ffmpeg python3-venv \
     libgbm1 libasound2 desktop-file-utils python3-opencv python3-pyatspi python3-pyzbar libzbar0 gir1.2-gtk-3.0 socat x11vnc xdotool at-spi2-core \
     && if [ -f /qq-package/QQ.deb ]; then \
          cp /qq-package/QQ.deb /tmp/qq.deb; \
@@ -19,9 +19,15 @@ RUN --mount=type=bind,source=deploy/linux,target=/qq-package,ro \
     && find /var/lib/apt/lists -type f -delete \
     && unlink /tmp/qq.deb
 
+RUN python3 -m venv /opt/df-audio \
+    && /opt/df-audio/bin/pip install --no-cache-dir silk-python==0.2.6
+
 COPY runtime/bridge/entry.cjs /opt/QQ/resources/app/bridge_entry.cjs
 COPY runtime/bridge/native-kernel.cjs /opt/QQ/resources/app/native-kernel.cjs
 COPY runtime/bridge/server.mjs /opt/QQ/resources/app/server.mjs
+COPY runtime/bridge/kernel /opt/QQ/resources/app/kernel
+COPY runtime/bridge/routes /opt/QQ/resources/app/routes
+COPY runtime/bridge/event-stream.mjs runtime/bridge/capabilities.mjs runtime/bridge/login-pump.mjs /opt/QQ/resources/app/
 COPY deploy/linux/start-qq.sh /app/start.sh
 COPY runtime/official-login/login_view.py /app/login_view.py
 COPY deploy/linux/start-login-view.sh /app/start-login-view.sh
@@ -40,7 +46,11 @@ ENV HOME=/home/node \
     QQ_BRIDGE_DATA_DIR=/bridge-data \
     QQ_NATIVE_UI_HOST=0.0.0.0 \
     QQ_NATIVE_UI_PORT=16082 \
-    QQ_BRIDGE_IMAGE_SEND=1
+    QQ_BRIDGE_IMAGE_SEND=1 \
+    QQ_BRIDGE_SILK_PYTHON=/opt/df-audio/bin/python \
+    QQ_BRIDGE_FILE_SEND=1 \
+    QQ_BRIDGE_RECORD_SEND=1 \
+    QQ_BRIDGE_FORWARD_SEND=1
 
 USER node
 EXPOSE 16082

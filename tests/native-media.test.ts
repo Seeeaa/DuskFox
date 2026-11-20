@@ -8,10 +8,10 @@ import { NativeKernel } from '../runtime/bridge/native-kernel.cjs';
 function probe(stub: Record<string, unknown> = {}) {
   const kernel = new NativeKernel();
   const emitted: Array<Record<string, any>> = [];
-  kernel.emit = (event: unknown) => { emitted.push(event as Record<string, any>); };
-  kernel.session = {};
-  kernel.uin = '10001';
-  kernel.msgService = stub;
+  kernel.state.emit = (event: unknown) => { emitted.push(event as Record<string, any>); };
+  kernel.state.session = {};
+  kernel.state.uin = '10001';
+  kernel.state.msgService = stub;
   return { kernel, emitted };
 }
 
@@ -124,11 +124,11 @@ test('原生合并转发展开：返回结构认不出时返回 null，不把 ra
 
 test('原生在线判据：已授权 + 消息服务在即在线，空闲 6 分钟不算掉线', () => {
   const { kernel } = probe({});
-  kernel.uin = '10001';
-  (kernel as any).loginSucceeded = true;
-  kernel.msgService = {};
-  (kernel as any).messageBinding = { session: kernel.session, service: kernel.msgService, id: 'listener-1' };
-  kernel.lastMsgAt = Date.now() - 6 * 60_000;
+  kernel.state.uin = '10001';
+  (kernel as any).state.loginSucceeded = true;
+  kernel.state.msgService = {};
+  (kernel as any).state.messageBinding = { session: kernel.state.session, service: kernel.state.msgService, id: 'listener-1' };
+  kernel.state.lastMsgAt = Date.now() - 6 * 60_000;
   const status = kernel.status();
   assert.equal(status.online, true, '空闲不等于掉线，否则所有发送会被 1404 拒绝');
   assert.ok(status.idleMs >= 5 * 60_000, '空闲时长要单独暴露给控制台');

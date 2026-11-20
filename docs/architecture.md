@@ -1,128 +1,53 @@
-# duskfox 架构与取舍
+# DuskFox 架构
 
-## 1. 分层
+QQ 进程保留官方客户端的启动、登录和会话生命周期。DF 观察官方账号初始化，账号确认且消息服务可用后接入收发。桥接恢复复用现有会话；后台不自动取码。控制台的手动登录入口继续有效。
 
-| 层 | 目录 | 职责 | 依赖方向 |
-|---|---|---|---|
-| 组合根 | `src/app.ts`、`src/main.ts` | 装配、生命周期、状态汇总、soft restart | 向下依赖全部 |
-| 控制台 | `src/webui/*` | HTTP 路由、会话、SSE、静态资源 | 只依赖 `WebuiContext` 接口 |
-| 协议 | `src/onebot/*` | 动作注册、消息段/CQ 转换、事件构造、五种传输 | 依赖 core + driver 接口 |
-| 基础 | `src/core/*` | 配置、日志、统计、消息 ID、路径、令牌 | 无业务依赖 |
-| 驱动 | `src/driver/*` | 账号状态机与消息收发 | 只依赖 core 的模型与类型 |
-| 插件 | `src/plugins/*` | 进程内扩展 | 依赖 service 的公开方法 |
-| 邮件通知 | `src/notify.ts` | SMTP 配置、状态通知与测试邮件 | 由 Application 订阅状态与错误 |
+## QQ 侧
 
-依赖只向下：驱动不认识 OneBot，协议层不认识 HTTP 控制台，界面只认 `Context` 接口。
-新增传输、驱动或页面都不需要改动其它层。
+- runtime/bridge/entry.cjs 引导官方客户端、捕获会话、装配 HTTP 服务。
+- native-kernel.cjs 保留构造函数和领域装配，作为现有调用方的统一门面。
+- kernel/session.cjs 管账号授权、会话有效性、消息监听绑定和在线状态。
+- kernel/login.cjs 管登录回调、手动登录和登录时间。
+- kernel/messages.cjs 管消息接收、去重、查询、发送编排与撤回。
+- kernel/elements.cjs 是原生元素与 OneBot 消息段的转换入口，实时消息、查询和转发节点共用。
+- kernel/media.cjs 管媒体下载和转发展开，media-upload.cjs 管 RichMedia 上传，media-files.cjs 管素材落地和转码。
+- kernel/groups.cjs、contacts.cjs、requests.cjs 各自维护群、联系人和请求能力。
+- kernel/meta.cjs 管消息元数据持久化和账号记录，diagnostics.cjs 管原生结构摘要。
+- server.mjs 负责 HTTP 装配、鉴权、一次 JSON 解码和路由表分发。routes/session.mjs、routes/account.mjs、routes/simulator.mjs 各自注册 method/path 与处理函数，没有第二份路径清单；模拟路由只在模拟内核注册。
+- event-stream.mjs 维护事件顺序、游标和有界缓冲，login-pump.mjs 隔离二维码调度，capabilities.mjs 生成三向能力和完整契约 v3 报告。Fox 直接消费 capabilities，运行时保留旧 features 字段供旧客户端读取。
 
-## 2. 一次消息的完整路径
+各领域分别实例化，通过显式 ctx 接收 state、options 和 kernel 门面。跨领域调用走门面方法，共享可变字段只写 ctx.state。native-kernel.cjs 不再向原型复制领域方法；kernel/state.cjs 统一分配数据，门面只提供委托方法和 HTTP 所需的只读属性。领域模块不创建独立 QQ 会话。
 
-```
-QQ 运行时
-   │ driver.emit({type:'message', message})
-   ▼
-Application.#events (Emitter)
-   │ service.handleMessage(message)
-   ▼
-OneBotService
-   ├─ 过滤：self 消息 / 事件开关
-   ├─ stats.incMessagesIn()
-   ├─ buildMessageEvent()  ← messageIds.register() 生成数字 id
-   ├─ networkManager.publish(event) → 各传输
-   └─ 事件环形缓冲 → SSE → 控制台“事件流”
-```
+## Fox 侧
 
-反向路径（动作）：
+- src/driver/bridge.ts 负责装配、启动和轮询计时。
+- src/driver/runtime-state.ts 保存账号状态、能力、登录展示状态、实例和事件游标，供登录、事件与动作组件共用。
+- src/driver/bridge/transport.ts 只负责 HTTP 请求和原生错误传递。
+- src/driver/login/coordinator.ts 负责显式登录指令与二维码展示，不因状态查询启动认证。
+- src/driver/bridge/events.ts 负责事件消费和消息元信息。
+- src/driver/bridge/operations.ts 负责动作转发与列表结果包装。
+- src/onebot 保留动作注册、ID 映射、事件补全和 HTTP/WS/SSE 传输。
 
-```
-Bot --HTTP/WS--> 适配器 --host.dispatch--> OneBotService.dispatch
-   ├─ ActionRegistry.invoke：别名 → 能力门禁 → TypeBox 校验 → handler
-   ├─ handler → driver.sendMessage() → 原生 message_id
-   ├─ messageIds.register(nativeId) → 数字 id
-   └─ 响应包 {status, retcode, data, message, wording, echo}
-```
+消息段统一使用 { type, data }。桥接驱动原样保留消息段数组，协议层只在引用 ID 映射或 CQ 字符串输出时处理内容。未知段和扩展字段保留在数组输出中。驱动不再依赖 OneBot 的段转换模块。
 
-## 3. 关键取舍
+## 后续功能扩展
 
-### 3.1 驱动接口而不是直接内嵌 QQ 代码
+新增媒体类型先在 elements 和媒体领域落地，通过 send / recv / download 分别声明能力。Fox 无需增加一份入站字段映射。
 
-QQ 侧代码版本敏感、平台相关、且需要二进制。把“进程内寄生”换成“进程外契约”后：
+新增群管理、文件和其它动作，原生调用放对应领域，HTTP 入口放路由，OneBot 参数和返回约定放动作模块。既有动作注册与能力声明继续复用。
 
-- 框架本身是纯 Node，Windows / Linux 行为一致，可测试、可容器化；
-- QQ 运行时崩溃或重启不影响控制台与配置；
-- 未来换实现（原生桥接、自研协议、其它客户端）只替换驱动。
+QQ 版本变化先修改入口或相关 kernel 领域，保持 HTTP 契约和段格式稳定。需要 OIDB 的能力按命令增量增加 packet 模块，不预先引入整套协议层。
 
-代价是驱动必须把能力翻译成统一模型，因此 `capabilities` 是显式契约，而不是“试试看”。
+向 NC 功能范围扩展时按领域增加实现，不按每个 API 复制一套宿主、状态和转换代码。结构调整与具体功能实现分别推进；本次不新增 NC 功能清单。
 
-### 3.2 能力门禁集中在一处
+## 本次迁移范围
 
-每个动作声明 `requires: ['privateMessage']` 之类的依赖，注册表在调用前统一检查。
-不支持的调用返回 `retcode: 1200`，文案说明缺什么能力。这样：
+生产代码、部署文件清单和已有消息段样本已同步迁移。本次只编写代码，未运行构建、测试、QQ 实测或部署。
 
-- 驱动可以只实现一部分能力，框架仍然完整（“降级而非崩溃”）；
-- 控制台的“能力范围”表由同一份 `capabilities` 推导，界面与后端不会说法不一；
-- 新增驱动不用逐个动作写兼容分支。
+## 能力契约与代码格式
 
-### 3.3 消息 ID：哈希 + 有界双向表
+契约 v3 的能力唯一来源是运行时 capabilities.mjs，RuntimeState 不再推导 send / recv / download 或兼容能力位。src/driver/bridge/legacy-capabilities.ts 只解释 v1/v2 数据，部署全部切到 v3 后删除。types.ts 的能力构造工具只供模拟驱动和旧契约适配使用。
 
-`message_id` 是 OneBot 客户端唯一持有的消息句柄。当前使用：`md5(原生id|会话|对象)`
-取 31 位正整数，保留最近 5000 条映射，并写入实例数据目录的 `message-ids.json`。
+共享状态集中不等于各领域数据完全独占。当前用显式 ctx/state 表达关联，增加原生状态字段时统一落到 kernel/state.cjs，跨领域行为通过 kernel 门面调用。
 
-- 优点：无数据库、无迁移、重启后同一个原生 id 仍得到同一个数字 id（哈希模式）；
-- 超出窗口的旧消息仍可能拿到 `1404 消息 ID 不存在或已超出保留窗口`。
-
-### 3.4 配置热重载而不是重启进程
-
-配置变更按“绑定参数”和“非绑定参数”区分：
-
-- 端口 / 地址 / URL 变了 → 重建该适配器（只重建这一个）；
-- 只改令牌、名称 → 原地更新，Bot 连接不断开。
-
-实现上是 `ConfigStore` 归一化并落盘后发出 `ConfigChange`，`NetworkManager.apply` 做差量对账。
-控制台点“保存”会立刻在 `network.json` 看到结果，服务端日志会记录变化数量。
-
-### 3.5 SSE 而不是 WebSocket 做控制台实时流
-
-控制台是单向消费（日志、事件、状态、二维码），SSE 足够且：
-
-- 浏览器原生 `EventSource`，自动重连，无需心跳协议；
-- 不占用 `ws` 连接预算，也不与 Bot 传输的鉴权逻辑混淆；
-- 断线后 UI 退化为轮询 `/api/status`，功能不受影响。
-
-### 3.6 环形缓冲 + 有界队列
-
-日志内存 1000 条、事件 300 条、消息映射 5000 条、上报队列 500 条、WebSocket 待发 200 条。
-所有对外缓冲都有上界，长时间运行不会因为没人消费而涨内存。
-
-### 3.7 诚实降级
-
-没有实现的页面元素一律保留占位并标注“待接入 / 暂不支持”，动作返回明确错误码；
-控制台的接口对照表由服务端 `endpoints()` 生成，`wired:false` 的条目前端显示“待接入”。
-这样“界面能用”和“功能没做完”不会被混为一谈。
-
-## 4. 扩展点
-
-| 想做的事 | 改哪里 |
-|---|---|
-| 新增动作 | `src/onebot/actions/*.ts` 加一个 `ActionDefinition`（含 schema 与 `requires`） |
-| 新增传输 | `src/onebot/network/` 实现适配器，在 `manager.ts` 注册 kind 与 diff 规则 |
-| 新增驱动 | 实现 `AccountDriver`，在 `driver/registry.ts` 登记 |
-| 新增控制台接口 | `src/webui/routes/*.ts` + `WebuiContext` 加方法 |
-| 新增事件类型 | `core/model.ts` 加结构 → `driver` 发事件 → `onebot/events.ts` 映射 |
-| 新增页面 | `src/webui/index.html` 的 `P` 表 + `ORDER` 数组（设计文件在 `webui/design/`） |
-
-## 5. 测试策略
-
-- 纯函数（段转换、ID 映射、配置归一化）：直接单测，无 IO；
-- 集成：每个用例在临时目录启动一个完整 `Application`，控制台端口用 0，
-  Bot 侧传输也用 0，因此可以并行跑；
-- 驱动契约：`mock` 覆盖全链路；`bridge` 用一个假的 HTTP 运行时验证请求/响应的字段与轮询行为；
-- UI：`npm run ui` 检查内联脚本语法、页面入口及登录/二维码接口引用；浏览器交互仍需单独验收。
-
-## 6. 已知边界
-
-1. `http-client`（HTTP POST 上报）是单向的：OneBot 规范里上报响应可以携带动作，这里尚未实现。
-2. `ws-server` 单端口多客户端，不区分“只收事件/只发动作”的角色（`http-server` 的 WS 挂载支持 `/api` 角色）。
-3. 二维码来自驱动，框架只负责展示与计时；原生运行时是否刷新由驱动决定。
-4. 插件只能挂钩事件与调用动作，暂不支持注册 HTTP 路由（避免与主路由表生命周期耦合）。
-5. 通知通道、自动更新、进程守护（systemd/计划任务）未内置，文档给出外部托管方式。
+.editorconfig 统一 UTF-8、LF 和两空格。npm run format 使用现有 TypeScript 格式化器直接写入，npm run format:check 供后续独立检查使用。

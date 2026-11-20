@@ -168,7 +168,7 @@ export class MockDriver implements AccountDriver {
   async sendMessage(message: OutboundMessage): Promise<SendResult> {
     if (!this.#status.online) throw new Error('模拟账号尚未登录，无法发送消息');
     const text = message.segments
-      .map((segment) => (segment.type === 'text' ? segment.text : `[${segment.type}]`))
+      .map((segment) => (segment.type === 'text' ? String(segment.data.text ?? '') : `[${segment.type}]`))
       .join('');
     if (!text.trim()) throw new Error('消息内容为空');
     if (text.length > 4000) throw new Error('消息过长（模拟上限 4000 字符）');
@@ -330,7 +330,7 @@ export class MockDriver implements AccountDriver {
     if (!this.#status.online) return;
     const friend = FRIENDS[Math.floor(Math.random() * FRIENDS.length)];
     if (!friend) return;
-    const segments: Segment[] = [{ type: 'text', text: '模拟消息：联调心跳正常' }];
+    const segments: Segment[] = [{ type: 'text', data: { text: '模拟消息：联调心跳正常' } }];
     this.#push({
       scene: 'private',
       messageId: `mock-in-${Date.now().toString(36)}-${(this.#counter += 1)}`,

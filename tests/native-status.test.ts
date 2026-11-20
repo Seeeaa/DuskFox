@@ -6,16 +6,16 @@ import { startInstance, waitFor } from './helpers.ts';
 
 function probe() {
   const kernel = new NativeKernel();
-  kernel.emit = () => {};
-  kernel.session = {};
-  kernel.uin = '10001';
+  kernel.state.emit = () => { };
+  kernel.state.session = {};
+  kernel.state.uin = '10001';
   return kernel;
 }
 
 test('状态查询零登录副作用：status() 不触发 quickLogin/login/requestQr', () => {
   const kernel = probe();
   const calls: string[] = [];
-  (kernel as any).loginService = {
+  (kernel as any).state.loginService = {
     getMsfStatus: () => { calls.push('getMsfStatus'); return 1; },
     quickLoginWithUin: () => { calls.push('quickLogin'); return true; },
     getLoginList: () => { calls.push('getLoginList'); return []; },
@@ -27,14 +27,14 @@ test('状态查询零登录副作用：status() 不触发 quickLogin/login/reque
 
 test('authorized 需要非空数字 uin：否则是 unknown，且身份字段清空', () => {
   const kernel = probe();
-  (kernel as any).loginSucceeded = true;
-  kernel.uin = '';
+  (kernel as any).state.loginSucceeded = true;
+  kernel.state.uin = '';
   const anonymous = kernel.status();
   assert.equal(anonymous.authorized, false);
   assert.equal(anonymous.accountState, 'unknown');
   assert.equal(anonymous.uin, '');
 
-  kernel.uin = '10001';
+  kernel.state.uin = '10001';
   const identified = kernel.status();
   assert.equal(identified.authorized, true);
   assert.equal(identified.accountState, 'authorized');
@@ -52,11 +52,11 @@ test('等官方会话确认账号并提供消息服务后才绑定监听', () =>
       serviceReads += 1;
       return ready ? service : null;
     },
-    getBuddyService: () => ({ addKernelBuddyListener() {} }),
-    getGroupService: () => ({ addKernelGroupListener() {} }),
+    getBuddyService: () => ({ addKernelBuddyListener() { } }),
+    getGroupService: () => ({ addKernelGroupListener() { } }),
   };
   const kernel = new NativeKernel({ sessionProvider: () => session, sessionAccount: () => account });
-  Object.assign(kernel, { markOnline() {}, friends: async () => [] });
+  Object.assign(kernel, { markOnline() { }, friends: async () => [] });
 
   kernel.attachMessages();
   assert.equal(serviceReads, 0);
@@ -77,25 +77,25 @@ test('等官方会话确认账号并提供消息服务后才绑定监听', () =>
 
 test('messageReady 来自当前绑定有效性，不是缓存对象存在', () => {
   const kernel = probe();
-  (kernel as any).loginSucceeded = true;
-  kernel.msgService = {};
+  (kernel as any).state.loginSucceeded = true;
+  kernel.state.msgService = {};
   assert.equal(kernel.status().messageReady, false, '只有对象、没有绑定不算就绪');
 
   const session = {};
   const service = {};
-  (kernel as any).session = session;
-  kernel.msgService = service;
-  (kernel as any).messageBinding = { session, service, id: 'listener-1' };
+  (kernel as any).state.session = session;
+  kernel.state.msgService = service;
+  (kernel as any).state.messageBinding = { session, service, id: 'listener-1' };
   assert.equal(kernel.status().messageReady, true);
 
   // 同会话换成另一个 service 对象：旧绑定立即失效
-  kernel.msgService = {};
+  kernel.state.msgService = {};
   assert.equal(kernel.status().messageReady, false);
 });
 
 test('会话失效后 account_state=signed_out，且不再报 authorized', () => {
   const kernel = probe();
-  (kernel as any).loginSucceeded = true;
+  (kernel as any).state.loginSucceeded = true;
   (kernel as any).invalidateSession();
   const status = kernel.status();
   assert.equal(status.accountState, 'signed_out');

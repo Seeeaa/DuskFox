@@ -7,6 +7,7 @@ import type { MessageStore } from '../../core/message-store.ts';
 import type { Stats } from '../../core/stats.ts';
 import type { AccountStatus } from '../../core/model.ts';
 import type { AccountDriver, CapabilityKey } from '../../driver/types.ts';
+import type { MediaAccess } from '../media.ts';
 import { ActionError, RETCODE } from '../types.ts';
 
 export interface ActionContext {
@@ -16,6 +17,7 @@ export interface ActionContext {
   readonly messageIds: MessageIdRegistry;
   /** Recent messages for `get_msg`. */
   readonly messages: MessageStore;
+  readonly media?: MediaAccess;
   readonly stats: Stats;
   readonly selfId: () => number;
   readonly online: () => boolean;
@@ -100,6 +102,7 @@ export class ActionRegistry {
     } catch (error) {
       if (error instanceof ActionError) throw error;
       const message = error instanceof Error ? error.message : String(error);
+      if (/OUTBOUND_(QUIET_HOURS|RANDOM_IDLE|QUEUE_EXPIRED)/.test(message)) throw new ActionError(message, RETCODE.forbidden);
       // 同一个动作反复失败（框架轮询、老版本 API）时不要刷屏：60 秒内只记一次。
       const now = Date.now();
       if (now - (this.#warnedAt.get(actionName) ?? 0) > 60_000) {
