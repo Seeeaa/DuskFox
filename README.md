@@ -1,6 +1,6 @@
 # DuskFox
 
-在 Linux Docker 里跑官方 QQ 客户端，把消息转成 OneBot v11，给 AstrBot 这类框架用，另外带一个网页控制台。
+（双进程登录）在 Linux Docker 里跑官方 QQ 客户端，把消息转成 OneBot v11，给 AstrBot 这类框架用，另外带一个网页控制台。
 
 目前是 Linux x86_64 的内测阶段，建议用测试号，机器留 2 GiB 以上可用内存。
 
