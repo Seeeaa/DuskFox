@@ -109,6 +109,8 @@ function toOb11Segments(native, helpers = {}) {
         data: {
           file: String(file.fileName || file.fileMd5 || ''),
           file_id: mediaLocator(native, element, 'file'),
+          ...(file.fileUuid ? { file_uuid: String(file.fileUuid) } : {}),
+          ...(file.fileId ? { native_file_id: String(file.fileId) } : {}),
           file_name: String(file.fileName || ''),
           ...(file.filePath ? { path: String(file.filePath) } : {}),
           ...(file.fileName ? { name: String(file.fileName) } : {}),

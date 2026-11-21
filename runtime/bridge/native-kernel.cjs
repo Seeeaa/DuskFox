@@ -111,6 +111,7 @@ class NativeKernel {
   buildVideoElement(...args) { return this.domains.mediaUpload.buildVideoElement(...args); }
   uploadForRichMedia(...args) { return this.domains.mediaUpload.uploadForRichMedia(...args); }
   media(...args) { return this.domains.media.media(...args); }
+  mediaProbe(...args) { return this.domains.media.probe(...args); }
   getForward(...args) { return this.domains.media.getForward(...args); }
   onRichMediaDownloadComplete(...args) { return this.domains.media.onRichMediaDownloadComplete(...args); }
   downloadRichMedia(...args) { return this.domains.media.downloadRichMedia(...args); }
@@ -157,7 +158,7 @@ class NativeKernel {
     this.domains.staging.start();
   }
   async stop(...args) {
-    try { await this.domains.staging.stop(); }
+    try { this.domains.media.stop(); await this.domains.staging.stop(); }
     finally { await this.domains.session.stop(...args); }
   }
   get authorized() { return this.domains.session.authorized; }

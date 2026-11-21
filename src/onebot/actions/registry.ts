@@ -35,6 +35,7 @@ export interface ActionDefinition<P extends TSchema = TObject, R = unknown> {
   readonly params?: P;
   /** Capabilities that must all be present, otherwise 1200 is returned. */
   readonly requires?: readonly CapabilityKey[];
+  readonly timeoutMs?: number;
   handle(params: Static<P>, context: ActionContext): Promise<R>;
 }
 
@@ -94,7 +95,7 @@ export class ActionRegistry {
     const started = performance.now();
     try {
       // 原生调用偶尔会一直不回来；不设上限的话框架会等满 60 秒再报 WS API 超时。
-      const data = await withTimeout(definition.handle(params, context), ACTION_TIMEOUT_MS, actionName);
+      const data = await withTimeout(definition.handle(params, context), definition.timeoutMs ?? ACTION_TIMEOUT_MS, actionName);
       const elapsed = Math.round(performance.now() - started);
       if (elapsed > 3000) this.#logger.warn('onebot', `${actionName} 较慢：${elapsed}ms`);
       else this.#logger.debug('onebot', `${actionName} ok (${elapsed}ms)`);

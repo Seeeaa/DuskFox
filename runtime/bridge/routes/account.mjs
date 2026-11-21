@@ -154,6 +154,18 @@ export function createAccountRoutes(context) {
       }
 
     }],
+    ["GET /api/media/probe", async ({ url, send }) => {
+      if (typeof kernel.mediaProbe !== 'function') {
+        return send(501, { ok: false, path: '', size: 0, channel: 'probe',
+          errors: [{ channel: 'probe', operation: 'resolve', error: '运行时未实现媒体探针' }] });
+      }
+      const kind = String(url.searchParams.get('kind') || 'file');
+      if (kind !== 'file') return send(400, { ok: false, path: '', size: 0, channel: 'probe',
+        errors: [{ channel: 'probe', operation: 'validate', error: '只支持 kind=file' }] });
+      return send(200, await kernel.mediaProbe(
+        String(url.searchParams.get('message_id') || ''), kind, String(url.searchParams.get('selector') || ''),
+      ));
+    }],
     ["GET /api/media", async ({ url, request, body, send }) => {
 
       if (typeof kernel.media !== 'function') return send(501, { error: '运行时未实现媒体下载' });

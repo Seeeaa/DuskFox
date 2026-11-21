@@ -37,6 +37,9 @@ export declare class NativeKernel {
   invalidateBinding(): void;
   invalidateSession(): void;
   getMessage(msgId: string, peer?: { chatType: number; peerUid: string; guildId: string }): Promise<any>;
+  mediaProbe(messageId: string, kind?: string, selector?: string): Promise<{
+    ok: boolean; path: string; size: number; channel: string; errors: unknown[];
+  }>;
   cacheMessage(message: any): any;
   configureOutbound(config: Record<string, unknown>): Record<string, unknown>;
   outboundStatus(): Record<string, unknown>;

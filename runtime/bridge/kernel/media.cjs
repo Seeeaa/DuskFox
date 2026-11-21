@@ -2,7 +2,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { CHAT_PRIVATE, withTimeout } = require('./shared.cjs');
-const { downloadMedia, guessExt } = require('./media-files.cjs');
+const { downloadMedia, guessExt, localFileInfo } = require('./media-files.cjs');
+const { FileAssistant, errorDetail, logDownload } = require('./file-assistant.cjs');
 
 const MEDIA_KEYS = { record: 'pttElement', image: 'picElement', file: 'fileElement', video: 'videoElement' };
 
@@ -38,7 +39,10 @@ function videoPathError(file, element) {
 class MediaDomain {
   constructor(ctx) {
     this.ctx = ctx;
+    this.fileAssistant = new FileAssistant(ctx);
   }
+
+  stop() { this.fileAssistant.stop(); }
 
   /** Select the outer element: elementId is not on pttElement/fileElement. */
   async media(msgId, kind, selector = '') {
@@ -51,7 +55,8 @@ class MediaDomain {
     if (!outer) throw new Error('该消息不包含指定媒体：' + kind + ' / ' + selector);
     const element = outer[key];
     if (kind === 'video') return this.video(msg, outer);
-    const candidates = [element.filePath, element.sourcePath, element.originalPath]
+    const candidates = [element.filePath, element.sourcePath, element.originalPath,
+      kind === 'file' ? this.ctx.state.mediaPaths.get('element:' + String(msg.msgId) + ':' + String(outer.elementId || ''))?.path : '']
       .map(value => String(value || '')).filter(Boolean);
     let file = candidates.find(value => fs.existsSync(value) && fs.statSync(value).isFile() &&
       (kind !== 'file' || !Number(element.fileSize) || fs.statSync(value).size === Number(element.fileSize))) || '';
@@ -66,7 +71,15 @@ class MediaDomain {
     } else {
       let url = String(element.pttUrl || element.url || element.originImageUrl || element.videoUrl || element.downloadUrl || '');
       if (kind === 'image' && url.startsWith('/')) url = 'https://gchat.qpic.cn' + url;
-      if (/^https?:\/\//i.test(url)) data = await downloadMedia(url, kind);
+      if (/^https?:\/\//i.test(url)) {
+        try { data = await downloadMedia(url, kind); }
+        catch (error) {
+          if (kind === 'file' && downloadError) {
+            throw new AggregateError([downloadError, error], downloadError.message + '\n' + String(error?.message || error));
+          }
+          throw error;
+        }
+      }
       else if (downloadError) throw downloadError;
       else throw new Error('媒体尚未落盘：' + kind + ' msg=' + msgId + ' element=' + String(outer.elementId || ''));
     }
@@ -281,18 +294,99 @@ class MediaDomain {
     }
   }
 
-  /** A received message file is addressed by msgId/elementId, not a group-file UUID. */
+  /** Preserve the existing /api/media result; channel diagnostics are exposed separately. */
   async downloadFile(msg, outer) {
-    return this.downloadRichMedia(msg, outer, {
-      strictElement: true,
-      timeoutMs: 120_000,
-      validateFile: file => {
-        const expected = Number(outer.fileElement?.fileSize || 0);
-        const actual = fs.statSync(file).size;
-        return expected > 0 && actual !== expected
-          ? '文件未完整落盘：expected=' + expected + ' actual=' + actual : '';
-      },
-    });
+    return (await this.fileDownloadResult(msg, outer)).path;
+  }
+
+  async fileDownloadResult(msg, outer) {
+    const element = outer.fileElement;
+    const identity = { fileUuid: String(element.fileUuid || ''), fileId: String(element.fileId || element.id || '') };
+    const errors = [];
+    let started = Date.now();
+    logDownload({ channel: 'downloadRichMedia', operation: 'downloadRichMedia', phase: 'start', ...identity,
+      messageId: String(msg.msgId), elementId: String(outer.elementId || ''), elapsedMs: 0 });
+    try {
+      const file = await this.downloadRichMedia(msg, outer, {
+        strictElement: true, timeoutMs: 120_000,
+        validateFile: value => {
+          try { localFileInfo(value, element.fileSize); return ''; }
+          catch (error) { return String(error.message || error); }
+        },
+      });
+      const info = localFileInfo(file, element.fileSize);
+      logDownload({ channel: 'downloadRichMedia', operation: 'downloadRichMedia', ok: true, ...identity,
+        elapsedMs: Date.now() - started, ...info });
+      return { ok: true, ...info, channel: 'downloadRichMedia', errors };
+    } catch (error) {
+      const detail = errorDetail('downloadRichMedia', 'downloadRichMedia', error, started, identity);
+      errors.push(detail);
+      logDownload(detail);
+    }
+    started = Date.now();
+    try {
+      const result = await this.fileAssistant.download({
+        ...identity, messageId: String(msg.msgId), fileName: String(element.fileName || ''),
+        fileSize: element.fileSize, peerUid: String(msg.peerUid || msg.parentMsgPeer?.peerUid || ''), timeoutMs: 120_000,
+      });
+      this.ctx.state.mediaPaths.set('element:' + String(msg.msgId) + ':' + String(outer.elementId || ''), {
+        path: result.path, at: Date.now(), channel: 'FileAssistant',
+      });
+      while (this.ctx.state.mediaPaths.size > 2000) this.ctx.state.mediaPaths.delete(this.ctx.state.mediaPaths.keys().next().value);
+      return { ok: true, path: result.path, size: result.size, channel: 'FileAssistant', errors: [...errors, ...result.errors] };
+    } catch (error) {
+      const details = error.downloadErrors?.length ? error.downloadErrors
+        : [errorDetail('FileAssistant', 'downloadFile', error, started, identity)];
+      errors.push(...details);
+      if (!error.downloadErrors?.length) logDownload(details[0]);
+      const failure = new AggregateError(errors.map(item => new Error(item.error)),
+        'FILE_DOWNLOAD_FAILED: ' + errors.map(item => item.channel + ': ' + item.error).join('\n'));
+      failure.probeResult = { ok: false, path: '', size: 0, channel: 'FileAssistant', errors };
+      throw failure;
+    }
+  }
+
+  /** GET probe performs the same lazy retrieval but only stats the downloaded payload. */
+  async probe(messageId, kind = 'file', selector = '') {
+    const started = Date.now();
+    try {
+      if (kind !== 'file') throw new Error('媒体探针仅支持 kind=file');
+      const msg = await this.ctx.kernel.getMessage(String(messageId));
+      if (!msg || !Array.isArray(msg.elements)) throw new Error('消息不存在或不可读');
+      const outer = msg.elements.find((item, index) => item?.fileElement &&
+        (!selector || String(item.elementId || ('index:' + index)) === selector));
+      if (!outer) throw new Error('该消息不包含指定文件');
+      const element = outer.fileElement;
+      const cached = this.ctx.state.mediaPaths.get('element:' + String(msg.msgId) + ':' + String(outer.elementId || ''));
+      const errors = [];
+      for (const file of [...new Set([element.filePath, element.sourcePath, element.originalPath, cached?.path].filter(Boolean))]) {
+        if (!fs.existsSync(file)) continue;
+        try {
+          const info = localFileInfo(String(file), element.fileSize);
+          const channel = file === cached?.path && cached.channel ? cached.channel : 'local';
+          logDownload({ channel, operation: 'probe', ok: true, ...info,
+            fileUuid: String(element.fileUuid || ''), fileId: String(element.fileId || ''), elapsedMs: Date.now() - started });
+          return { ok: true, ...info, channel, errors };
+        } catch (error) {
+          const detail = errorDetail('local', 'stat', error, started, {
+            fileUuid: element.fileUuid, fileId: element.fileId,
+          });
+          errors.push(detail);
+          logDownload(detail);
+        }
+      }
+      try {
+        const result = await this.fileDownloadResult(msg, outer);
+        return { ...result, errors: [...errors, ...result.errors] };
+      } catch (error) {
+        if (error.probeResult) return { ...error.probeResult, errors: [...errors, ...error.probeResult.errors] };
+        throw error;
+      }
+    } catch (error) {
+      const detail = errorDetail('probe', 'resolve', error, started);
+      logDownload(detail);
+      return { ok: false, path: '', size: 0, channel: 'probe', errors: [detail] };
+    }
   }
 
   async downloadRichMedia(msg, outer, options = {}) {

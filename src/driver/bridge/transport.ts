@@ -15,7 +15,9 @@ export class BridgeTransport {
     let response: Response;
     // Text sends are quick, but media (RichMedia upload) can take much longer;
     // a 5s cap made image sends look like a dead bridge.
-    const timeoutMs = path.startsWith('/api/send') || path.startsWith('/api/media')
+    const fileDownload = path.startsWith('/api/media/probe') ||
+      (path.startsWith('/api/media?') && new URL(path, 'http://bridge').searchParams.get('kind') === 'file');
+    const timeoutMs = fileDownload ? 250000 : path.startsWith('/api/send') || path.startsWith('/api/media')
       ? 125000 : path.startsWith('/api/forward') || path.startsWith('/api/message') ? 35000 : 5000;
     try {
       response = await fetch(`${this.endpoint}${path}`, {

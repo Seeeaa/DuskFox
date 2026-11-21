@@ -258,4 +258,15 @@ function imageSizeOf(buffer) {
   return { width: 0, height: 0 };
 }
 
-module.exports = { mediaTmpDir, guessExt, pruneMediaDir, materializeImage, materializeMediaFile, ensureSilk, downloadMedia, materializeAudio, saveMediaBuffer, imageSizeOf };
+/** File metadata only: probes do not read the payload into memory. */
+function localFileInfo(file, expectedSize = 0) {
+  if (!file) throw new Error('下载完成但没有本地 filePath');
+  const stat = require('node:fs').statSync(file);
+  if (!stat.isFile()) throw new Error('下载路径不是文件：' + file);
+  if (Number(expectedSize) > 0 && stat.size !== Number(expectedSize)) {
+    throw new Error('FILE_CONTENT_INCOMPLETE: expected=' + expectedSize + ' actual=' + stat.size + ' path=' + file);
+  }
+  return { path: file, size: stat.size };
+}
+
+module.exports = { mediaTmpDir, guessExt, pruneMediaDir, materializeImage, materializeMediaFile, ensureSilk, downloadMedia, materializeAudio, saveMediaBuffer, imageSizeOf, localFileInfo };

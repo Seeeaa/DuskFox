@@ -225,6 +225,7 @@ function mediaDownloadActions(name: string, kind: MediaKind, label: string): Arr
   return [{
     name,
     description: '取得' + label + '的下载地址和实际字节',
+    timeoutMs: kind === 'file' ? 260000 : undefined,
     requires: ['mediaDownload'],
     params: Type.Object({
       message_id: Type.Optional(MessageIdSchema),
