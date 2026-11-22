@@ -19,7 +19,7 @@ docker compose -f deploy/linux/compose.yaml exec -T fox node -p "JSON.parse(requ
 
 OneBot 的 HTTP 和 WebSocket 默认开在本机 13000，把地址和配置里那枚令牌填到框架的适配器里就能连。
 
-构建时会从 QQ 官方地址下载固定版本的客户端，所以要能连外网。下载不通的话，可以参考 deploy/linux/README.md 自己放一份同版本的 QQ.deb。
+构建时会从 QQ 官方地址下载固定版本的客户端，所以要能连外网。下载不通的话，可以参考 [Docker 部署说明](deploy/linux/README.md) 自己放一份同版本的 QQ.deb。
 
 ## 界面
 
