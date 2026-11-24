@@ -477,6 +477,8 @@ html.boot .orb i{animation:none;opacity:0}
 
 .geo{width:min(300px,44vw);top:-2px;overflow:visible;fill:none}
 .geo .sun{fill:var(--accent);stroke:none;animation:sink 18s ease-in-out infinite alternate}
+.geo .geo-rays{transform-box:fill-box;transform-origin:50% 50%;animation:raysturn 120s linear infinite;will-change:transform}
+@keyframes raysturn{to{transform:rotate(360deg)}}
 .geo .rf line{stroke:var(--ink);opacity:.35;animation:shim 3.6s ease-in-out infinite alternate;animation-delay:calc(var(--k)*.4s)}
 .geo .rf line.o{stroke:var(--accent);opacity:1}
 @keyframes sink{from{transform:translateY(-6px)}to{transform:translateY(22px)}}
@@ -1025,8 +1027,14 @@ function geo(i){
  var x=34+(i-1)*24;
  var L=[[26,'o'],[19,''],[12,''],[6,'']].map(function(w,k){return '<line class="'+w[1]+'" x1="'+(-w[0])+'" x2="'+w[0]+'" y1="'+(79+k*7)+'" y2="'+(79+k*7)+'" style="--k:'+k+'"/>'}).join('');
  var ticks=ORDER.map(function(k,j){return '<line class="geo-stop'+(j===i-1?' is-on':'')+'" x1="'+(34+j*24)+'" x2="'+(34+j*24)+'" y1="66" y2="74"/>'}).join('');
- return '<div class="geo geo-nav" role="slider" tabindex="0" aria-label="页面切换，左右拖动或使用方向键" aria-orientation="horizontal" aria-valuemin="1" aria-valuemax="9" aria-valuenow="'+i+'" aria-valuetext="'+pad(i)+' '+E(P[ORDER[i-1]].n)+'" aria-describedby="geo-help"><svg viewBox="0 0 260 110" aria-hidden="true"><defs><clipPath id="hz"><rect x="-70" y="0" width="400" height="70"/></clipPath></defs><line x1="0" y1="70" x2="260" y2="70"/>'+ticks+'<g class="geo-carriage" transform="translate('+x+' 0)"><g clip-path="url(#hz)"><circle class="sun" cx="0" cy="70" r="26"/><path d="M-40 70A40 40 0 0 1 40 70"/><path d="M-56 70A56 56 0 0 1 56 70" stroke-dasharray="2.4 7.6" stroke-width="2" stroke-linecap="round"/></g><g class="rf">'+L+'</g></g></svg><span class="geo-readout"><span class="geo-label">'+pad(i)+' · '+E(P[ORDER[i-1]].n)+'</span><span>01 — 09</span></span><span class="geo-hint" id="geo-help">左右拖动 · 松手切页</span></div>';
+ // 太阳外圈：整圈短射线，下半圆由 #hz 裁掉；整组缓慢自转（角度由公共时钟算，登录过渡用同一个角度）。
+ var rays=(function(){var out=[],r1=48,r2=58;for(var d=0;d<360;d+=15){var t=d*Math.PI/180;out.push('<line x1="'+(r1*Math.cos(t)).toFixed(2)+'" y1="'+(70-r1*Math.sin(t)).toFixed(2)+'" x2="'+(r2*Math.cos(t)).toFixed(2)+'" y2="'+(70-r2*Math.sin(t)).toFixed(2)+'" stroke-width="1.6" stroke-linecap="round"/>')}return '<g class="geo-rays">'+out.join('')+'</g>'})();
+ return '<div class="geo geo-nav" role="slider" tabindex="0" aria-label="页面切换，左右拖动或使用方向键" aria-orientation="horizontal" aria-valuemin="1" aria-valuemax="9" aria-valuenow="'+i+'" aria-valuetext="'+pad(i)+' '+E(P[ORDER[i-1]].n)+'" aria-describedby="geo-help"><svg viewBox="0 0 260 110" aria-hidden="true"><defs><clipPath id="hz"><rect x="-70" y="0" width="400" height="70"/></clipPath></defs><line x1="0" y1="70" x2="260" y2="70"/>'+ticks+'<g class="geo-carriage" transform="translate('+x+' 0)"><g clip-path="url(#hz)"><circle class="sun" cx="0" cy="70" r="26"/><path d="M-40 70A40 40 0 0 1 40 70"/>'+rays+'</g><g class="rf">'+L+'</g></g></svg><span class="geo-readout"><span class="geo-label">'+pad(i)+' · '+E(P[ORDER[i-1]].n)+'</span><span>01 — 09</span></span><span class="geo-hint" id="geo-help">左右拖动 · 松手切页</span></div>';
 }
+/* 日轮射线角度：主页与登录过渡共用同一时钟，交班不跳。 */
+var RAYS_DEG_PER_S=3;
+function raysAngle(nowMs){return ((nowMs/1000)*RAYS_DEG_PER_S)%360}
+function syncRays(){var g=$('.geo-rays');if(!g||!g.getAnimations)return;g.getAnimations().forEach(function(a){if(a.animationName==='raysturn'){try{a.startTime=0}catch(er){}}})}
 function head(i,t,l){var c=0,h=t.split('').map(function(ch){return '<span style="--c:'+(c++)+'">'+ch+'</span>'}).join('');var pv=window.__pgPrev,dr=window.__pgDir||0,ix=(pv&&dr)?'<span class="ixn '+(dr>0?'ru':'rd')+'" data-pv="'+pad(pv)+'"><i><b>'+pad(dr>0?pv:i)+'</b><b>'+pad(dr>0?i:pv)+'</b></i></span>':pad(i);return geo(i)+'<div class="idx">'+ix+' / 09 · duskfox</div><h1 aria-label="'+t+'">'+h+'<b class="pd" style="--c:'+c+'"></b></h1><p class="lead">'+l+'</p>'}
 function uptime(){var s=Math.max(0,Math.floor((Date.now()-T0)/1000)),d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d+' 天 '+h+' 小时 '+m+' 分'}
 /* 在线时长只取 QQ 连续会话起点（/api/status account.onlineSince），不拿控制台登录时间充当。 */
@@ -1418,8 +1426,10 @@ function outboundAllowed(){var o=S.outboundRuntime||{},state=o.state||{};return 
 function paintAllowed(){var el=$('#outbound-allowed');if(el)el.textContent=outboundAllowed()}
 function capabilityCards(){
  var cards=(S.caps||[]).filter(function(c){return !/^media(?:-|$)/.test(c.key)});
- var kinds=[['text','文本'],['image','图片'],['record','语音'],['file','文件'],['video','视频'],['forward','合并转发']];
- kinds.forEach(function(k){var parts=['recv','send','download'].map(function(direction,i){var row=(S.caps||[]).find(function(c){return c.key==='media-'+direction}),ok=row&&row.state!=='no'&&row.detail.indexOf(k[1])>=0;return ['接收','发送','下载'][i]+'：'+(row?(ok?'支持':'不支持'):'未知')});cards.push({label:k[1],detail:parts.join(' · '),state:parts.every(function(v){return /：支持$/.test(v)})?'yes':parts.some(function(v){return /：支持$/.test(v)})?'partial':'no'})});
+ // 文本与合并转发不经过文件下载链路，只判定接收/发送；视频暂不提供，整块不展示。
+ var kinds=[['text','文本',['recv','send']],['image','图片',['recv','send','download']],['record','语音',['recv','send','download']],['file','文件',['recv','send','download']],['forward','合并转发',['recv','send']]];
+ var directionLabels={recv:'接收',send:'发送',download:'下载'};
+ kinds.forEach(function(k){var parts=k[2].map(function(direction){var row=(S.caps||[]).find(function(c){return c.key==='media-'+direction}),ok=row&&row.state!=='no'&&row.detail.indexOf(k[1])>=0;return directionLabels[direction]+'：'+(row?(ok?'支持':'不支持'):'未知')});cards.push({label:k[1],detail:parts.join(' · '),state:parts.every(function(v){return /：支持$/.test(v)})?'yes':parts.some(function(v){return /：支持$/.test(v)})?'partial':'no'})});
  (S.actions||[]).forEach(function(a){cards.push({label:a.description||a.name,detail:a.name,state:a.supported?'yes':'no'})});
  return cards.map(function(c){return '<div class="li"><div class="k">'+E(c.label)+'<small>'+E(c.detail)+'</small></div>'+tag(c.state==='yes'?'y':c.state==='partial'?'p':'n')+'</div>'}).join('')||'<div class="li">读取中…</div>';
 }
@@ -1514,7 +1524,7 @@ P.overview={n:'概览',r:function(){
    '<div class="lab">'+statusLine(a,drv)+'</div></div>'+
    (a.online?'':'<div class="heroact"><a class="btn g s" href="#/account">去账号页登录</a></div>')+
    '</div>'+
-   '<div class="sig"><div class="sh"><span class="sgs" aria-hidden="true"><span class="sgl">日志</span></span><span class="src">近 60 秒 · 每秒日志条数 · <span id="sgtotal">0 条</span><span class="sg-legend"><i></i>最近 9 秒</span></span></div><div class="sgw"><canvas class="wv big" data-rows="7" data-series="vals" aria-hidden="true"></canvas><div class="sgt" id="sgt"></div></div></div></div>'+
+   '<div class="sig"><div class="sh"><span class="sgs" aria-hidden="true"><span class="sgl">日志</span></span><span class="src">近 60 秒 · 每秒日志条数 · <span id="sgtotal">0 条</span><span class="sg-legend"><i></i>最近 9 秒</span></span></div><div class="sgw"><canvas class="wv big" data-rows="7" data-series="vals" aria-hidden="true"></canvas><div class="sgt" id="sgt"></div></div></div>'+
    '<div class="grid tiles">'+[['rx','收到消息',S.stat.rx,'本次会话累计'],['tx','发出消息',S.stat.tx,'本次会话累计'],['','OneBot 客户端',S.stat.conn,'已建立的机器人连接'],['','事件 / 分钟',S.stat.epm,'近 60 秒（含心跳）']].map(function(x){return '<div class="tile" title="'+x[3]+'"><div class="lab">'+x[1]+(x[0]==='rx'?'<small id="outbound-allowed" style="float:right;font-size:11px;font-weight:400">'+E(outboundAllowed())+'</small>':'')+'</div><div class="num"'+(x[0]?' data-c="'+x[0]+'"':'')+'>'+x[2]+'</div><div class="tileh">'+x[3]+'</div></div>'}).join('')+'</div>';
  })+'</div>'+
  '<div class="sec"><h2>能力范围</h2><div class="list">'+capabilityCards()+'</div></div>'+
@@ -1556,7 +1566,7 @@ var ORDER=['overview','account','network','onebot','debug','logs','files','setti
 /* ====== 落日拖动导航 ====== */
 var geoCleanup=null,geoFocusAfterRoute=false;
 function initGeoNav(){
- var el=$('.geo-nav');if(!el)return;
+ var el=$('.geo-nav');if(!el)return;syncRays();
  var art=$('svg',el),carriage=$('.geo-carriage',el),label=$('.geo-label',el),hint=$('.geo-hint',el),ticks=$$('.geo-stop',el);
  var current=ORDER.indexOf(cur),preview=current,position=current,target=current,velocity=0;
  var pointer=null,originX=0,originY=0,originIndex=current,step=24,moved=false;
@@ -1867,7 +1877,9 @@ function morphEnter(lg,go){
  var cl=mk('clipPath',{id:'xc'}),xr=document.createElementNS(ns,'rect');
  xr.setAttribute('x',0);xr.setAttribute('y',0);xr.setAttribute('width',W);xr.setAttribute('height',H*2);cl.appendChild(xr);
  var st='fill:none;stroke:var(--ink)';
- var cs='fill:none;stroke:var(--ink);shape-rendering:geometricPrecision',p1=mk('circle',{style:cs,'clip-path':'url(#xc)'}),p2=mk('circle',{style:cs,'clip-path':'url(#xc)'}),p3=mk('circle',{style:cs+';stroke-dasharray:2.4 7.6;stroke-width:2;stroke-linecap:round','clip-path':'url(#xc)'}),sun=mk('circle',{fill:'#df7f43','clip-path':'url(#xc)'});
+ var cs='fill:none;stroke:var(--ink);shape-rendering:geometricPrecision',p1=mk('circle',{style:cs,'clip-path':'url(#xc)'}),p2=mk('circle',{style:cs,'clip-path':'url(#xc)'}),sun=mk('circle',{fill:'#df7f43','clip-path':'url(#xc)'});
+ var rayG=document.createElementNS(ns,'g');rayG.setAttribute('clip-path','url(#xc)');svg.appendChild(rayG);
+ var rayT=document.createElementNS(ns,'g');rayG.appendChild(rayT);for(var rd=0;rd<24;rd++){var rl=document.createElementNS(ns,'line'),th0=rd*15*Math.PI/180;rl.setAttribute('x1',(48*Math.cos(th0)).toFixed(3));rl.setAttribute('y1',(-48*Math.sin(th0)).toFixed(3));rl.setAttribute('x2',(58*Math.cos(th0)).toFixed(3));rl.setAttribute('y2',(-58*Math.sin(th0)).toFixed(3));rl.setAttribute('style','stroke:var(--ink);fill:none;stroke-linecap:round;vector-effect:non-scaling-stroke');rayT.appendChild(rl)}
  var hl=mk('line',{style:'stroke:var(--ink)'}),bar=mk('line',{style:'stroke:#df7f43'});
  var sm=[0,1,2].map(function(){return mk('line',{style:'stroke:var(--ink)'})});
  var tk=[0,1,2,3,4,5,6,7,8].map(function(j){return mk('line',{style:j===idx?'stroke:#df7f43':'stroke:var(--ink)'})});
@@ -1878,15 +1890,18 @@ function morphEnter(lg,go){
  var arc=function(x,y,rr){return 'M'+(x-rr)+' '+y+'A'+rr+' '+rr+' 0 1 1 '+(x+rr)+' '+y+'A'+rr+' '+rr+' 0 1 1 '+(x-rr)+' '+y};
  var ln=function(e,x1,y1,x2,y2,w,o){e.setAttribute('x1',x1);e.setAttribute('y1',y1);e.setAttribute('x2',x2);e.setAttribute('y2',y2);e.style.strokeWidth=w;e.style.strokeOpacity=o};
  var t0=performance.now(),rel=false,done=false;
- var fin=function(){if(done)return;done=true;svg.remove();a.classList.remove('pre','hold');lg.classList.add('hidden');lg.classList.remove('morph');lg.style.cssText=''};
+ var fin=function(){if(done)return;done=true;svg.remove();a.classList.remove('pre','hold');syncRays();lg.classList.add('hidden');lg.classList.remove('morph');lg.style.cssText=''};
  var fr=function(now){
   if(done)return;
   var t=Math.min(1,(now-t0)/D),A=ee(sg(t,0,.7)),K=ee(sg(t,.7,1)),G=ee(sg(t,.75,1));
-  if(!rel&&now-t0>700){rel=true;a.classList.remove('pre')}
+  if(!rel&&now-t0>1000){rel=true;a.classList.remove('pre');syncRays()}
   var x=lp(cx,hx,A),y=lp(cy,hy,A),sw=lp(1,.8,A),so=lp(.15,1,A),r1=lp(R,40*s,A),r2=lp(R*1.5,56*s,A);
-   var DD=ee(sg(t,.3,.9));
-   [p1,p2,p3].forEach(function(c,j){c.setAttribute('cx',x);c.setAttribute('cy',y);c.setAttribute('r',j?r2:r1);c.style.strokeWidth=sw});
-   p1.style.strokeOpacity=so;p2.style.strokeOpacity=so*(1-DD);p3.style.strokeOpacity=so*DD;
+   var DD=ee(sg(t,.3,.85)),XF=ee(sg(t,.8,.95));
+   [p1,p2].forEach(function(c,j){c.setAttribute('cx',x);c.setAttribute('cy',y);c.setAttribute('r',j?r2:r1);c.style.strokeWidth=sw});
+   p1.style.strokeOpacity=so;var CT=ee(sg(t,.05,.3)),pr=lp(r2,r2*53/56,DD),pc=2*Math.PI*pr/24,dl=lp(lp(pc,pc*.6,CT),1.6*sw,DD);p2.setAttribute('r',pr);p2.style.strokeWidth=lp(sw,r2*10/56,DD);p2.style.strokeDasharray=dl+' '+Math.max(0,pc-dl);p2.style.strokeDashoffset=dl/2-pr*raysAngle(now)*DD*Math.PI/180;p2.style.strokeOpacity=so*(1-XF);
+   rayG.style.opacity=(so*XF).toFixed(3);
+   rayT.setAttribute('transform','translate('+x.toFixed(2)+' '+y.toFixed(2)+') scale('+(r2/56).toFixed(4)+') rotate('+raysAngle(now).toFixed(2)+')');rayT.style.strokeWidth=(1.6*sw).toFixed(3);
+
   sun.setAttribute('cx',lp(dx,hx,A));sun.setAttribute('cy',lp(dy,hy-6*s,A));sun.setAttribute('r',lp(8,26*s,A));
   xr.setAttribute('height',y+lp(H,0,A));
   ln(hl,lp(hx1,r.left,A),lp(hy0,hy,A),lp(hx2,r.left+260*s,A),lp(hy0,hy,A),sw,1);
