@@ -1,6 +1,6 @@
 # Linux Docker 内测
 
-适用：`x86_64` Linux、Docker Engine 与 Compose v2。建议至少留出 2 GiB 可用内存和 4 GiB 磁盘空间。每套部署只登录一个 QQ 账号。
+适用：`x86_64` Linux、Docker Engine 与 Compose v2。在 Windows 本机跑的话不用看这份，直接用 Docker Desktop，步骤见 [Windows 部署](../windows/README.md)。建议至少留出 2 GiB 可用内存和 4 GiB 磁盘空间。每套部署只登录一个 QQ 账号。
 
 镜像在本机构建。默认从腾讯官方 CDN 下载固定版本的 Linux QQ `.deb`；如果下载不通，可自行从 [Dockerfile.qq](Dockerfile.qq) 中的官方地址获取同版安装包，命名为 `deploy/linux/QQ.deb` 后再构建。两种方式都校验 SHA-256。该文件已被 Git 忽略，仓库和镜像仓库均不分发 QQ 安装包。QQ 更新后需重新验证桥接。当前测试服务器从官方 CDN 下载较慢；全新镜像构建尚未完成实测。
 
