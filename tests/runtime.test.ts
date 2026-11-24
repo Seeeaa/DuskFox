@@ -258,7 +258,7 @@ test('密码登录：控制台 -> 运行时（能力由 features 决定，错误
 });
 
 /**
- * P0-1 回归：request 事件曾在 bridge 入口被过滤掉，好友/加群申请永远到不了 OneBot，
+ * 回归：request 事件曾在 bridge 入口被过滤掉，好友/加群申请永远到不了 OneBot，
  * 而 features.requestHandle 仍是 true。这里走"模拟内核 emit → /api/events → 处理动作回到运行时"整条路。
  */
 test('请求事件：好友/加群申请经 bridge 入口进入 /api/events，并被处理动作送回运行时', async () => {

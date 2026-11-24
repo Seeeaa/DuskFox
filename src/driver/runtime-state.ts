@@ -76,7 +76,7 @@ export class RuntimeState {
       (payload?.authorized || (messageReady && uin) ? 'authorized' : 'unknown');
     const authorized = sessionState === 'authorized';
     const nativeReady = authorized && messageReady && Boolean(uin);
-    // M8：事件流故障只影响"接收"，不得翻转发送能力与账号状态。
+    // 事件流故障只影响"接收"，不得翻转发送能力与账号状态。
     // online = 已授权 && 消息服务就绪；事件流健康单独用 detail 与接收侧告警表达。
     const eventStreamDown = this.pollFailures >= 3;
     const online = nativeReady;

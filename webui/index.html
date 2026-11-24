@@ -1351,8 +1351,10 @@ function outboundAllowed(){var o=S.outboundRuntime||{},state=o.state||{};return 
 function paintAllowed(){var el=$('#outbound-allowed');if(el)el.textContent=outboundAllowed()}
 function capabilityCards(){
  var cards=(S.caps||[]).filter(function(c){return !/^media(?:-|$)/.test(c.key)});
- var kinds=[['text','文本'],['image','图片'],['record','语音'],['file','文件'],['video','视频'],['forward','合并转发']];
- kinds.forEach(function(k){var parts=['recv','send','download'].map(function(direction,i){var row=(S.caps||[]).find(function(c){return c.key==='media-'+direction}),ok=row&&row.state!=='no'&&row.detail.indexOf(k[1])>=0;return ['接收','发送','下载'][i]+'：'+(row?(ok?'支持':'不支持'):'未知')});cards.push({label:k[1],detail:parts.join(' · '),state:parts.every(function(v){return /：支持$/.test(v)})?'yes':parts.some(function(v){return /：支持$/.test(v)})?'partial':'no'})});
+ // 文本与合并转发不经过文件下载链路，只判定接收/发送；视频暂不提供，整块不展示。
+ var kinds=[['text','文本',['recv','send']],['image','图片',['recv','send','download']],['record','语音',['recv','send','download']],['file','文件',['recv','send','download']],['forward','合并转发',['recv','send']]];
+ var directionLabels={recv:'接收',send:'发送',download:'下载'};
+ kinds.forEach(function(k){var parts=k[2].map(function(direction){var row=(S.caps||[]).find(function(c){return c.key==='media-'+direction}),ok=row&&row.state!=='no'&&row.detail.indexOf(k[1])>=0;return directionLabels[direction]+'：'+(row?(ok?'支持':'不支持'):'未知')});cards.push({label:k[1],detail:parts.join(' · '),state:parts.every(function(v){return /：支持$/.test(v)})?'yes':parts.some(function(v){return /：支持$/.test(v)})?'partial':'no'})});
  (S.actions||[]).forEach(function(a){cards.push({label:a.description||a.name,detail:a.name,state:a.supported?'yes':'no'})});
  return cards.map(function(c){return '<div class="li"><div class="k">'+E(c.label)+'<small>'+E(c.detail)+'</small></div>'+tag(c.state==='yes'?'y':c.state==='partial'?'p':'n')+'</div>'}).join('')||'<div class="li">读取中…</div>';
 }

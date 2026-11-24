@@ -91,7 +91,7 @@ export class BridgeEvents {
       if (this.state.pollFailures === 1 || this.state.pollFailures % 10 === 0) {
         this.state.context.logger.warn('driver:bridge', `事件轮询失败 ${this.state.pollFailures} 次：${detail}`);
       }
-      // M8：事件流故障只影响接收。不得把 online 置 false——那会让发送被
+      // 事件流故障只影响接收。不得把 online 置 false——那会让发送被
       // "账号未登录"拒绝，并可能误发掉线邮件。只更新 detail，接收侧告警由日志承担。
       if (this.state.pollFailures >= 3 && this.state.status.online) {
         this.state.setStatus({

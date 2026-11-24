@@ -108,7 +108,7 @@ class SessionDomain {
 
   /** 在 QQ 自己创建的会话上维持消息服务绑定。 */
   attachMessages() {
-    // 软重启停止期间不建立新绑定（M7）。
+    // 软重启停止期间不建立新绑定。
     if (this.ctx.state.stopped) return;
     try {
       const captured = this.ctx.options.sessionProvider?.() || this.ctx.state.session;
@@ -146,7 +146,7 @@ class SessionDomain {
       const candidate = session.getMsgService();
       this.ctx.state.probe.messageServiceSeen = Boolean(candidate);
       if (!candidate) {
-        // 服务对象消失：绑定一并作废，等它回来时重绑，避免复用可能已被丢弃的监听（M3）。
+        // 服务对象消失：绑定一并作废，等它回来时重绑，避免复用可能已被丢弃的监听。
         this.invalidateBinding();
         return;
       }
@@ -184,7 +184,7 @@ class SessionDomain {
       this.ctx.state.msgService = candidate;
       if (sessionChanged) {
         // 客户端没有成对的 removeKernel*Listener 时接受"每会话一代"，
-        // 旧代回调由 this.session 守卫抑制；代数计数进 diagnostics 便于发现泄漏（M6）。
+        // 旧代回调由 this.session 守卫抑制；代数计数进 diagnostics 便于发现泄漏。
         this.ctx.state.buddyListenerReady = false;
         this.ctx.state.groupListenerReady = false;
         this.ctx.state.probe.listenerGenerations = (this.ctx.state.probe.listenerGenerations || 0) + 1;
@@ -198,7 +198,7 @@ class SessionDomain {
         try {
           previous.service.removeKernelMsgListener?.(String(previous.id));
         } catch (error) {
-          // 卸载 API 的真实签名未实机验证；失败允许，但必须能被诊断看到（M5）。
+          // 卸载 API 的真实签名未实机验证；失败允许，但必须能被诊断看到。
           this.ctx.state.probe.lastListenerCleanupError = String(error?.name || 'Error');
           this.ctx.state.probe.listenerCleanupFailures = (this.ctx.state.probe.listenerCleanupFailures || 0) + 1;
         }

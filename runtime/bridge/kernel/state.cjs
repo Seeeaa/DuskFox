@@ -27,7 +27,7 @@ function createNativeState() {
   state.listenerReady = false;
   state.loginListener = null;
   state.messageBinding = null;
-  /** 软重启标志：stop() 到 start() 之间不建立新绑定（M7）。 */
+  /** 软重启标志：stop() 到 start() 之间不建立新绑定。 */
   state.stopped = false;
   state.probe = {
     qrPictures: 0,

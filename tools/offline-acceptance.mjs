@@ -267,7 +267,7 @@ async function main() {
       JSON.stringify(voiceSegment),
     );
 
-    // ------------------------------------------------------------ request 事件（P0-1 回归）
+    // ------------------------------------------------------------ request 事件（回归）
     const friendRequest = await runtimeApi('POST', '/sim/request', {
       kind: 'friend',
       userId: '20009',

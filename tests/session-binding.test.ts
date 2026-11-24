@@ -64,7 +64,7 @@ test('同会话换新 service 对象：必须重绑，旧监听不投递、新�
   h.setService(second);
   h.kernel.attachMessages();
 
-  assert.equal(h.kernel.state.msgService, second, '同会话换对象必须重绑（M1）');
+  assert.equal(h.kernel.state.msgService, second, '同会话换对象必须重绑');
   assert.equal(second.added, 1, '新 service 必须装一次监听');
 
   firstSocket.listener.onRecvMsg([{ msgId: 'old-1' }]);
@@ -105,7 +105,7 @@ test('服务对象消失再回来：重绑而不是复用旧监听', () => {
 
   h.setService(service);
   h.kernel.attachMessages();
-  assert.equal(service.added, 2, '服务回来必须重新装监听（M3）');
+  assert.equal(service.added, 2, '服务回来必须重新装监听');
   assert.equal(h.kernel.status().messageReady, true);
 });
 
@@ -118,7 +118,7 @@ test('stop 期间不建立绑定，start 后必然重绑一次', async () => {
 
   await h.kernel.stop();
   h.kernel.attachMessages();
-  assert.equal(h.kernel.state.msgService, null, 'stop 期间不得建立新绑定（M7）');
+  assert.equal(h.kernel.state.msgService, null, 'stop 期间不得建立新绑定');
 
   await h.kernel.start(() => { });
   assert.equal(service.added, 2, 'start 后必须重绑');

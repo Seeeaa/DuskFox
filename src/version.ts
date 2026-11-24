@@ -1,2 +1,2 @@
 /** Single source of truth for the version reported everywhere. */
-export const VERSION = '1.1.8';
+export const VERSION = '1.1.9';

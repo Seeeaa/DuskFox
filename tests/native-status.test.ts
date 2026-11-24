@@ -103,7 +103,7 @@ test('会话失效后 account_state=signed_out，且不再报 authorized', () =>
   assert.equal(status.uin, '');
 });
 
-/** 事件流持续失败时，发送能力（online）不得被翻转（M8）。 */
+/** 事件流持续失败时，发送能力（online）不得被翻转。 */
 test('事件流连续失败不影响 online：只影响接收并写进 detail', async () => {
   const server = http.createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
