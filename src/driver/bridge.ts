@@ -94,7 +94,7 @@ export class BridgeDriver implements AccountDriver {
     if (this.#runtime.started) return;
     this.#runtime.started = true;
     this.#runtime.startedAt = Date.now();
-    this.#runtime.historyFloor = Math.floor((this.#runtime.startedAt - 5000) / 1000);
+    this.#runtime.historyFloor = 0;
     await this.#refreshStatus();
     this.#statusTimer = setInterval(() => void this.#refreshStatus(), 2000);
     this.#statusTimer.unref?.();

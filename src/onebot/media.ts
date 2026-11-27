@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { finished } from 'node:stream/promises';
 import type { ConfigStore } from '../core/config.ts';
 import type { Logger } from '../core/logger.ts';
 import type { Segment } from '../core/model.ts';
@@ -14,6 +15,21 @@ export interface MediaReference {
 }
 
 const KINDS = new Set(['image', 'record', 'file', 'video']);
+
+/** Bounded admission; queued requests do not start a bridge download. */
+class Limiter {
+  #active = 0;
+  readonly #queue: Array<() => void> = [];
+  constructor(readonly concurrency: number, readonly maxQueue: number) {}
+  async run<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.#active >= this.concurrency) {
+      if (this.#queue.length >= this.maxQueue) throw new Error('MEDIA_BUSY: 媒体队列已满');
+      await new Promise<void>(resolve => this.#queue.push(resolve));
+    } else this.#active++;
+    try { return await operation(); }
+    finally { const next = this.#queue.shift(); if (next) next(); else this.#active--; }
+  }
+}
 const MIME: Record<string, string> = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
   webp: 'image/webp', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
@@ -42,6 +58,8 @@ export class MediaAccess {
   readonly #logger: Logger;
   readonly #fallbackKey = randomBytes(32).toString('hex');
   readonly #pending = new Map<string, Promise<MediaPayload>>();
+  readonly #downloads = new Limiter(2, 16);
+  readonly #responses = new Limiter(4, 32);
   #boundHost = '';
   #boundPort = 0;
 
@@ -104,8 +122,9 @@ export class MediaAccess {
         ? mediaReference(existing.nativeId, existing.kind, existing.selector)
         : mediaReference(nativeId, kind);
       const name = String(data.file_name || data.name || data.file || kind).split(/[\\/]/).pop() || kind;
-      const url = kind !== 'video' && /^https?:\/\//i.test(String(data.url || ''))
-        ? String(data.url) : this.url(reference, name);
+      const originalUrl = String(data.qq_url || data.url || '');
+      if (/^https?:\/\//i.test(originalUrl) && !this.locate(originalUrl)) data.qq_url = originalUrl;
+      const url = this.url(reference, name);
       delete data.path;
       return {
         ...segment,
@@ -124,7 +143,7 @@ export class MediaAccess {
     const key = mediaReference(ref.nativeId, ref.kind, ref.selector);
     let pending = this.#pending.get(key);
     if (!pending) {
-      pending = this.#driver.fetchMedia(ref.nativeId, ref.kind, ref.selector).then(media => {
+      pending = this.#downloads.run(() => this.#driver.fetchMedia!(ref.nativeId, ref.kind, ref.selector)).then(media => {
         if (!media) throw new Error('运行时未返回媒体内容：' + key);
         return media;
       });
@@ -135,6 +154,25 @@ export class MediaAccess {
   }
 
   async handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
+    if (!(request.url || '').startsWith('/media/')) return false;
+    try {
+      return await this.#responses.run(async () => {
+        if (response.destroyed) return true;
+        const handled = await this.#handle(request, response);
+        if (handled && !response.writableFinished && !response.destroyed) await finished(response, { cleanup: true });
+        return handled;
+      });
+    } catch (error) {
+      if (!response.headersSent && !response.destroyed) {
+        const detail = error instanceof Error ? error.message : String(error);
+        response.writeHead(detail.includes('MEDIA_BUSY') ? 429 : 502, { 'content-type': 'application/json; charset=utf-8' });
+        response.end(JSON.stringify({ error: detail }));
+      }
+      return true;
+    }
+  }
+
+  async #handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const url = new URL(request.url || '/', 'http://localhost');
     if (!url.pathname.startsWith('/media/')) return false;
     const fail = (status: number, error: string): void => {
@@ -183,7 +221,7 @@ export class MediaAccess {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.#logger.warn('onebot:media', detail);
-      fail(detail.includes('MEDIA_NOT_READY') ? 409 : 502, detail);
+      if (!response.headersSent && !response.destroyed) fail(detail.includes('MEDIA_BUSY') ? 429 : detail.includes('MEDIA_NOT_READY') ? 409 : 502, detail);
     }
     return true;
   }

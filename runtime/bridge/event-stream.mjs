@@ -1,6 +1,6 @@
 import { normalizeMessage } from './kernel/elements.cjs';
 
-export function createEventStream(kernel, logger, note, capacity = 1024) {
+export function createEventStream(kernel, logger, note, capacity = 8192) {
   const ring = [];
   let cursor = 0;
   let eventChain = Promise.resolve();

@@ -2,12 +2,59 @@ import type { RuntimeState } from '../runtime-state.ts';
 import type { BridgeTransport } from './transport.ts';
 import type { AccountNotice, InboundMessage, Segment } from '../../core/model.ts';
 import type { BridgeEventEnvelope } from './contract.ts';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
 export class BridgeEvents {
   readonly state: RuntimeState;
   readonly transport: BridgeTransport;
+  readonly #cursorFile: string;
+  #saved = '';
+  #hasCursor = false;
   constructor(state: RuntimeState, transport: BridgeTransport) {
     this.state = state;
     this.transport = transport;
+    const key = createHash('sha256').update(transport.endpoint).digest('hex').slice(0, 16);
+    this.#cursorFile = path.join(state.context.paths.data, 'bridge-cursor-' + key + '.json');
+    try {
+      const saved = JSON.parse(fs.readFileSync(this.#cursorFile, 'utf8')) as { cursor?: unknown; instance?: unknown };
+      if (!Number.isSafeInteger(saved.cursor) || Number(saved.cursor) < 0 || typeof saved.instance !== 'string') throw new Error('游标文件格式无效');
+      state.cursor = Number(saved.cursor);
+      state.eventInstance = saved.instance;
+      this.#hasCursor = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') state.context.logger.warn('driver:bridge', '恢复事件游标失败，将在首次轮询对齐：' + String(error));
+    }
+  }
+
+  async #saveCursor(): Promise<void> {
+    const text = JSON.stringify({ cursor: this.state.cursor, instance: this.state.eventInstance }) + '\n';
+    if (text !== this.#saved) {
+      const temporary = this.#cursorFile + '.' + process.pid + '.tmp';
+      await fs.promises.mkdir(path.dirname(this.#cursorFile), { recursive: true });
+      await fs.promises.writeFile(temporary, text, { encoding: 'utf8', mode: 0o600 });
+      await fs.promises.rename(temporary, this.#cursorFile);
+      this.#saved = text;
+    }
+    this.#hasCursor = true;
+    if (this.state.pollFailures > 0) {
+      this.state.context.logger.info('driver:bridge', `事件轮询已恢复（此前连续失败 ${this.state.pollFailures} 次）`);
+      this.state.pollFailures = 0;
+    }
+  }
+
+  async #alignCursor(cursor: number, instance: string): Promise<void> {
+    const previousCursor = this.state.cursor;
+    const previousInstance = this.state.eventInstance;
+    this.state.cursor = cursor;
+    this.state.eventInstance = instance;
+    try { await this.#saveCursor(); }
+    catch (error) {
+      // A failed checkpoint must not make the next poll treat alignment as committed.
+      this.state.cursor = previousCursor;
+      this.state.eventInstance = previousInstance;
+      throw error;
+    }
   }
   /**
      * Poll the runtime event stream.
@@ -16,8 +63,8 @@ export class BridgeEvents {
      * - never run two polls at once: a slow runtime must not make two requests
      *   race on the same cursor and replay or skip events;
      * - advance the cursor per delivered event, not to the batch cursor blindly;
-     * - if the runtime restarted (cursor went backwards) resync from zero instead
-     *   of dropping the batch;
+     * - missing checkpoints, new instances and backwards cursors align to the
+     *   current server head without replaying their existing backlog;
      * - if the runtime ring overflowed (`lost`), report the gap loudly instead of
      *   pretending everything arrived.
      */
@@ -33,28 +80,31 @@ export class BridgeEvents {
       // runtime may cap batch size (the legacy one returns 100), and jumping to
       // the server cursor at batch end would skip the rest of the backlog.
       for (let page = 0; page < 16; page += 1) {
-        const payload = await this.transport.request<BridgeEventEnvelope>(`/api/events?after=${this.state.cursor}`);
+        const payload = await this.transport.request<BridgeEventEnvelope>(`/api/events?after=${this.#hasCursor ? this.state.cursor : 0}`);
         const events = payload?.events ?? [];
         const serverCursor = Number(payload?.cursor ?? this.state.cursor);
         const instance = String(payload?.instance ?? '');
-        if (instance && this.state.eventInstance && instance !== this.state.eventInstance) {
-          this.state.context.logger.warn('driver:bridge', `运行时实例已变更（${this.state.eventInstance} → ${instance}），重置事件游标并重新同步`);
-          this.state.eventInstance = instance;
-          this.state.cursor = 0;
+        if (!Number.isSafeInteger(serverCursor) || serverCursor < 0) throw new Error('服务端事件游标无效：' + serverCursor);
+        if (!this.#hasCursor) {
+          await this.#alignCursor(serverCursor, instance);
+          this.state.context.logger.info('driver:bridge', `首次对齐，跳过 ${serverCursor} 条历史（按当前序列计，本批 ${events.length} 条），游标对齐到 ${serverCursor}`);
+          return;
+        }
+        if (instance && instance !== this.state.eventInstance) {
+          const previousInstance = this.state.eventInstance;
+          await this.#alignCursor(serverCursor, instance);
+          this.state.context.logger.warn('driver:bridge', `运行时实例变化（${previousInstance} → ${instance}），跳过旧实例积压 ${serverCursor} 条（按当前序列计，本批 ${events.length} 条），游标对齐到 ${serverCursor}`);
           return;
         }
         if (instance)
           this.state.eventInstance = instance;
-        if (this.state.pollFailures > 0) {
-          this.state.context.logger.info('driver:bridge', `事件轮询已恢复（此前连续失败 ${this.state.pollFailures} 次）`);
-          this.state.pollFailures = 0;
-        }
         if (serverCursor < this.state.cursor) {
-          // The runtime restarted and its sequence restarted too: re-read from 0.
-          this.state.context.logger.warn('driver:bridge', '运行时事件游标重置，重新同步事件流');
-          this.state.cursor = 0;
+          const previousCursor = this.state.cursor;
+          await this.#alignCursor(serverCursor, instance || this.state.eventInstance);
+          this.state.context.logger.warn('driver:bridge', `服务端事件游标回退 ${previousCursor} → ${serverCursor}（回退区间 ${serverCursor + 1}..${previousCursor}），跳过 ${serverCursor} 条历史（按当前序列计，本批 ${events.length} 条），已重新对齐`);
           return;
         }
+        const pageStart = this.state.cursor;
         for (const envelope of events) {
           const data = envelope?.data;
           const eventCursor = Number(envelope?.cursor ?? 0);
@@ -62,22 +112,28 @@ export class BridgeEvents {
             continue;
           if (eventCursor > 0 && eventCursor <= this.state.cursor)
             continue;
+          if (eventCursor > this.state.cursor + 1) {
+            const from = this.state.cursor + 1;
+            this.state.context.logger.warn('driver:bridge', `EVENT_GAP: ${from}..${eventCursor - 1}（${eventCursor - from} 条不可恢复；运行时只有内存环）`);
+          }
           this.deliverEvent(data);
           if (eventCursor > 0)
             this.state.cursor = Math.max(this.state.cursor, eventCursor);
         }
         const lost = Number(payload?.lost ?? 0);
         if (lost > 0) {
-          this.state.context.logger.warn('driver:bridge', `运行时事件环缓冲溢出，丢失 ${lost} 条（已从最早可用事件继续）`);
-          this.state.cursor = Math.max(this.state.cursor, serverCursor - events.length);
+          this.state.context.logger.warn('driver:bridge', `EVENT_GAP: after=${pageStart}，运行时报告丢失 ${lost} 条，已从最早可用事件继续`);
+          // Do not jump to serverCursor: old bridges may return only one page.
         }
+        await this.#saveCursor();
         if (this.state.cursor >= serverCursor)
           return;
         if (events.length === 0) {
           // Nothing left to deliver, but the server knows of newer events: the
           // ring dropped them. Advance and say so, instead of looping forever.
-          this.state.context.logger.warn('driver:bridge', `事件游标跳跃 ${this.state.cursor} → ${serverCursor}，缓冲区已清理`);
+          this.state.context.logger.warn('driver:bridge', `EVENT_GAP: ${this.state.cursor + 1}..${serverCursor}（${serverCursor - this.state.cursor} 条），缓冲区已清理，无法补拉`);
           this.state.cursor = serverCursor;
+          await this.#saveCursor();
           return;
         }
         // Smaller batch than the server cursor: keep paging immediately.

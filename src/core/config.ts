@@ -7,6 +7,8 @@ import type { RuntimePaths } from './paths.ts';
 import type { Logger } from './logger.ts';
 import { createId, createToken } from './tokens.ts';
 
+const CONFIG_VERSION = 1;
+
 /* -------------------------------------------------------------------------- */
 /* Schemas                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -202,8 +204,22 @@ function readJsonFile(file: string): unknown {
 export function writeJsonAtomic(file: string, data: unknown, mode = 0o600): void {
   const temp = `${file}.${process.pid}.tmp`;
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(temp, `${JSON.stringify(data, null, 2)}\n`, { encoding: 'utf8', mode });
-  fs.renameSync(temp, file);
+  const value = data && typeof data === 'object' && !Array.isArray(data)
+    ? { ...data, $version: CONFIG_VERSION } : data;
+  fs.writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode });
+  try {
+    if (fs.existsSync(file)) {
+      const previous = readJsonFile(file) as Record<string, unknown>;
+      if (previous && typeof previous === 'object' && !Object.hasOwn(previous, '$version')) {
+        try { fs.copyFileSync(file, file + '.v0.bak', fs.constants.COPYFILE_EXCL); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      } else fs.copyFileSync(file, file + '.bak');
+    }
+    fs.renameSync(temp, file);
+  } catch (error) {
+    try { fs.unlinkSync(temp); } catch { /* Preserve the original write failure. */ }
+    throw error;
+  }
 }
 
 function assignIds<T extends { id: string }>(entries: T[], prefix: string): boolean {
@@ -497,8 +513,12 @@ export class ConfigStore {
       return initial;
     }
     const raw = readJsonFile(file);
+    const version = raw && typeof raw === 'object' ? Number((raw as Record<string, unknown>).$version ?? 0) : 0;
+    if (!Number.isSafeInteger(version) || version < 0 || version > CONFIG_VERSION) {
+      throw new ConfigError('配置版本不支持，保留原文件：' + file + ' version=' + version);
+    }
     const value = normalise(schema, raw);
-    if (JSON.stringify(value) !== JSON.stringify(raw)) {
+    if (JSON.stringify({ ...(value as object), $version: CONFIG_VERSION }) !== JSON.stringify(raw)) {
       writeJsonAtomic(file, value);
       this.#logger.info('config', `已规范化 ${path.basename(file)}`);
     }

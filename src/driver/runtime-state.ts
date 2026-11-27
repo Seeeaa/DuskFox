@@ -46,16 +46,13 @@ export class RuntimeState {
   qrSeenAt = 0;
   qrHint = '';
   manualReloginUntil = 0;
-  /**
-     * 驱动就绪的时刻：早于它的消息一律视为“历史积压”，不再下发给框架。
-     * 断线重连时桥接会从游标 0 重放环形缓冲，旧消息会把机器人的指令重新触发一遍。
-     */
+  /** Driver start time; event delivery is governed by the bridge cursor. */
   startedAt = 0;
-  /** 允许下发的最旧消息（秒）；启动后 5 秒宽限，容忍正常网络延迟。 */
+  /** Compatibility field; zero disables startup history filtering. */
   historyFloor = 0;
   /** 账号这次登录的起始时间（毫秒）：运行时长按它算，而不是按页面打开时间。 */
   onlineSince = 0;
-  /** 当前 QQ 会话是否已进入消息就绪，用来过滤登录时的历史积压。 */
+  /** Whether this QQ session has entered message readiness. */
   wasOnline = false;
   readonly inbox: InboundMessage[] = [];
   applyStatus(payload: BridgeStatusPayload): void {
@@ -90,12 +87,11 @@ export class RuntimeState {
         this.onlineSince = bridgeLoginAt;
       else if (!this.onlineSince)
         this.onlineSince = Date.now();
-      // 刚上线：QQ 会把离线期间积压的群消息一次性推过来，全部当成“历史”，只放行 5 秒内的新消息。
-      // 用驱动启动时间做水位不够——扫码前积压的消息时间晚于启动时间，照样会被当成新指令。
+      // Backlog is delivered from the saved cursor, including messages older than startup.
       if (!this.wasOnline || newLogin) {
         this.wasOnline = true;
-        this.historyFloor = Math.floor((Date.now() - 5000) / 1000);
-        this.context.logger.info('driver:bridge', '账号上线：丢弃上线前的积压消息');
+        this.historyFloor = 0;
+        this.context.logger.info('driver:bridge', '账号上线：按事件游标交付积压消息');
       }
     }
     else if (sessionState === 'signed_out') {
